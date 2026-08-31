@@ -1,94 +1,108 @@
 # Workflow graph: спецификация
 
-Этот документ определяет YAML-модель workflow, её validation и правила,
-по которым graph engine создаёт activations. Run storage, Agent attempts и
-управление процессами определены в `SPEC.md`, а публичное поведение CLI — в
-`cli.md`.
+Этот документ определяет семантику workflow graph, его validation и правила,
+по которым graph engine создаёт activations. Формат workflow-файла и описание
+его полей определены в `format.spec.md`, Run storage, Agent attempts и управление
+процессами — в `SPEC.md`, а публичное поведение CLI — в `cli.md`.
 
-## Модель workflow
+## Модель graph
 
-- **Workflow** — YAML-шаблон ориентированного графа steps. Его ID совпадает с
-  именем файла без `.yaml`. До создания run шаблон загружается, проверяется и
-  материализуется; ошибка на этом этапе не создаёт run. Run использует
-  собственный снимок workflow, поэтому изменение исходного шаблона не меняет
-  уже начатое выполнение. Порядок описания steps сохраняется при
-  материализации и является частью семантики workflow.
-- **Step** — узел с уникальным ID, необязательным `agent: <agent-id>`,
-  необязательной ссылкой на YAML-шаблон prompt, `human: bool` и списком outputs.
-  Без `agent` Step использует `default-agent` из config. `join: all` опционален;
-  если он задан, это непустой список различных пар `step-id` и `artifact-id`.
-  Отсутствие join не создаёт join-derived activations. Outputs задаёт разрешённые
-  ArtifactIds, но не требует публиковать каждый из них. Отдельных transitions,
-  `when` и routing result нет.
-- **Artifact в graph** имеет ключ `(attempt-n, step-id, artifact-id)`. Все
-  версии хранятся для истории. Для одной пары `(step-id, artifact-id)` graph
-  выбирает версию с максимальным подходящим `attempt-n`; к требованиям join
-  доступен только artifact успешно завершённого attempt.
+- **Workflow** — ориентированный граф Steps. До создания run source workflow,
+  prompt templates и Agents проверяются и materialize’ятся. Изменение source
+  files после этого не меняет run. Порядок Steps сохраняется и является частью
+  scheduling.
+- **Step** — узел графа. `depends-on` перечисляет source Steps, успешное
+  завершение которых требуется для activation. Зависимостей от отдельных
+  artifacts нет.
+- **Input mapping** принадлежит конкретному target attempt и использует пару
+  `(source-step-id, input-id)` как ключ artifact: StepId определяет выбранный
+  source Step, а InputId — один из объявленных им `outputs`. Отдельной сущности
+  Input с собственным ID нет.
+- **Artifact в graph** имеет ключ `(attempt-n, step-id, input-id)`. Все версии
+  хранятся для истории. К inputs доступен только artifact успешно завершённого
+  source attempt.
 
-Все символические IDs, включая WorkflowId, StepId, ArtifactId, AgentId,
-AgentTypeId и PromptId, соответствуют `[a-z]+(?:-[a-z]+)*`.
+Успешный attempt публикует ровно все artifacts, объявленные в `outputs`. Поэтому
+выбор source attempt однозначно определяет полный набор inputs от этого Step.
+Step с пустым `outputs` также может быть dependency: его завершённый attempt
+является версией зависимости, даже если не передаёт artifacts.
 
-## Initial activation, joins и frontier
+## Initial activation, dependencies и frontier
 
-`start` создаёт initial activation первого описанного step с пустым input, то
-есть без выбранных artifact versions. Это обычная activation и Agent attempt с
-номером `0`; отдельной схемы Step или attempt для начала run нет. Если у первого
-step объявлен `join: all`, он применяется только к последующим activations.
+`start` создаёт initial activation первого описанного Step с пустым input и
+номером attempt `0`. Это обычная activation; отдельной схемы entry Step нет.
+`depends-on` первого Step игнорируется только для этой bootstrap-activation и
+применяется ко всем его последующим activations.
 
-Каждое требование `join: all` образует ориентированное ребро от пары `(source
-step-id, artifact-id)` в target step. Публикация нескольких outputs может открыть
-несколько ветвей; один output может открыть fan-out в несколько target steps.
+Каждый StepId в `depends-on` образует ориентированное ребро от source Step в
+target Step. Успешное завершение одного Step открывает fan-out во все target
+Steps, которые от него зависят. Условных transitions, `when` и выбора ветви по
+набору опубликованных artifacts нет.
 
-Frontier — вычисляемое множество ready steps. Один step присутствует в нём не
-более одного раза. После initial activation step получает join-derived activation
-только когда для каждого требования его `join: all` доступен artifact свежее
-нижней границы. Нижняя граница требования — версия, выбранная последним attempt
-этого step для этого требования; initial attempt с пустым input границ не создаёт.
+Frontier — вычисляемое множество ready Steps. Один Step присутствует в нём не
+более одного раза. После initial activation Step становится ready, когда для
+каждого его dependency существует успешно завершённый source attempt новее
+нижней границы этой зависимости. Нижняя граница — source attempt, выбранный
+предыдущей activation этого target Step; initial activation с пустым input
+границ не создаёт.
 
-Для новой activation выбирается максимальная доступная версия каждого требования
-с номером меньше номера создаваемого attempt. Выбранные номера фиксируются в
-attempt и позднейшие artifacts их не изменяют. Если между activations появились
-несколько версий, создаётся одна activation с последней версией; остальные
-остаются историей.
+Для новой activation выбирается доступный source attempt с максимальным номером
+для каждого dependency. Его номер должен быть меньше номера создаваемого
+attempt. Выбранные номера фиксируются при создании attempt, и более поздние
+source attempts их не меняют. Если между activations завершилось несколько
+attempts одного source Step, выбирается только последний; остальные остаются
+историей.
 
-Например, attempt `review` с номером `11` не может выбрать artifact attempt
-`15`; attempt `review` с номером `16` выбирает `15`, только если он уже доступен
-при создании attempt. Старые версии не могут удовлетворить следующий join в
-цикле.
+Например, attempt `review` с номером `11` не может выбрать source attempt `15`;
+attempt `review` с номером `16` выбирает `15`, если он уже успешно завершён при
+создании `16`. Следующая activation `review` обязана выбрать более новый attempt
+того же dependency и не может повторно использовать `15`.
+
+## Inputs и prompt
+
+Input activation содержит по одному выбранному source attempt для каждого
+StepId из `depends-on`. Все объявленные `outputs` выбранного source attempt
+передаются target Step как mapping `(step-id, input-id) → artifact path`.
+Именно в этом mapping пара является ключом. InputIds разных source Steps могут
+совпадать, поскольку StepId устраняет неоднозначность.
+
+Agent type получает этот mapping вместе с materialized Agent и сформированным
+prompt. Placeholders Markdown template разрешаются из того же неизменяемого
+mapping по правилам `format.spec.md`. Позднее появившиеся версии artifacts не
+изменяют ни mapping, ни prompt уже созданного attempt.
 
 ## Циклы, terminal и blocked run
 
-Граф может содержать циклы. Повторное достижение step создаёт новый attempt;
-прошлые attempts и artifacts не переиспользуются и не изменяются.
+Граф может содержать циклы. Повторное достижение Step создаёт новый attempt;
+предыдущие attempts и artifacts не переиспользуются и не изменяются.
 
 В цикле `a → b → c → a`, где `a` описан первым, initial attempt `a` получает
-пустой input. Output `a` активирует `b`, output `b` — `c`, а свежий output `c`
-удовлетворяет join и создаёт следующий attempt `a`. Пустой input не участвует в
-следующих итерациях.
+пустой input. Завершение `a` активирует `b`, завершение `b` — `c`, а свежий
+завершённый attempt `c` удовлетворяет `depends-on` и создаёт следующий attempt
+`a`. Пустой bootstrap-input не участвует в следующих итерациях.
 
-У цикла могут быть независимые входные, feedback- и выходные artifacts. Join
-участника может дополнительно ждать artifacts уже запущенных ветвей, а его
-outputs могут одновременно продолжить цикл и открыть steps вне него. Специального
-общего cycle input или output нет.
+У цикла могут быть независимые входные, feedback- и выходные artifacts. Один
+Step может зависеть одновременно от участника цикла и внешнего Step, а его
+outputs могут передаваться Steps внутри и вне цикла. Специального общего cycle
+input или output нет.
 
-Step terminal, если ни один join не ссылается на его outputs. Нетерминальный step
-может штатно закончить динамическую ветвь, не опубликовав downstream artifact.
+Step terminal, если ни один Step не содержит его ID в `depends-on`.
 Run завершён, когда отсутствуют запущенные и незавершённые attempts, ready
-activations и частично удовлетворённые joins. Join частично удовлетворён, если
-свежа хотя бы одна, но не все его версии; тогда run blocked, а не completed.
+activations и частично удовлетворённые dependencies. Dependency group частично
+удовлетворена, если для target Step свеж хотя бы один, но не все source attempts;
+тогда run blocked, а не completed.
 
 ## Планирование
 
-Поле `human` относится к Step. В одном run могут одновременно существовать human
-и non-human attempts.
+В одном run могут одновременно существовать human и non-human attempts.
 
 - На каждом scheduling pass supervisor обязан запустить все ready non-human
   activations параллельно.
 - Одновременно выполняется не более одного human attempt. Если терминал свободен,
-  выбирается ready human step, раньше описанный в materialized workflow; остальные
-  остаются во frontier.
+  выбирается ready human Step, раньше описанный в materialized workflow;
+  остальные остаются во frontier.
 - Non-human attempts работают параллельно с human attempt. Перед запуском новые
-  activations одного scheduling pass сортируются по порядку steps и получают
+  activations одного scheduling pass сортируются по порядку Steps и получают
   глобальные attempt numbers в этом порядке.
 - После durable-изменения, влияющего на frontier или незавершённые attempts,
   выполняется следующий scheduling pass. Native resume сохраняет прежний `n`.
@@ -97,34 +111,30 @@ activations и частично удовлетворённые joins. Join ча�
 
 `validate` и preflight `start` проверяют:
 
-- YAML-схему workflow, отсутствие duplicate mapping keys и неизвестных полей,
-  включая удалённые `transitions` и `when`;
-- совпадение WorkflowId с именем файла, валидность всех IDs и непустую
-  упорядоченную последовательность уникальных Steps;
-- что у любого Step join отсутствует либо является непустым `join: all`, outputs
-  содержат уникальные ArtifactIds, а `human` является boolean;
-- что явный Agent Step существует, а при его отсутствии существует
-  `default-agent`; type, model и reasoning каждого выбранного Agent валидны по
-  registry `AgentType` и type поддерживает native resume; существование,
-  materialization и валидность указанного prompt template;
-- уникальность пар в одном join, существование source step и объявление им
-  требуемого ArtifactId в outputs;
-- статическую достижимость: initial activation первого Step образует начальное
-  множество, а другой Step добавляется только при наличии join и достижимости
-  producers всех его требований;
-- допустимость циклов, включая join первого Step для повторной activation.
-  Циклическая компонента без bootstrap-пути от initial activation недостижима;
-- допустимость outputs без consumers и отсутствия статически terminal Step.
+- соответствие workflow и prompt templates `format.spec.md`;
+- существование явного Agent каждого Step либо `default-agent`, валидность его
+  type, model и reasoning и поддержку native resume Agent type;
+- существование всех StepIds из `depends-on` и всех PromptIds;
+- что каждый placeholder prompt ссылается на Step из `depends-on` и InputId из
+  `outputs` этого source Step;
+- статическую достижимость: первый Step достижим initial activation, а другой
+  Step — только если все его dependencies достижимы; non-entry Step с пустым
+  `depends-on` не имеет activation path и невалиден;
+- допустимость cycles, включая `depends-on` первого Step для повторной
+  activation; циклическая компонента без bootstrap-пути недостижима;
+- допустимость outputs без consumers и отсутствия terminal Step.
 
-Перед созданием run все выбранные Agents резолвятся и materialize’ятся в снимок
-workflow. Содержимое Artifact — произвольные bytes и validation workflow его не
-разбирает. Во время выполнения статическая reachability повторно не вычисляется.
+Перед созданием run все выбранные Agents и prompt templates materialize’ятся в
+снимок workflow. Во время выполнения статическая reachability повторно не
+вычисляется.
 
-## Durable input activation
+## Fail-fast input validation
 
-Initial attempt с `n = 0` хранит пустой input. Каждый subsequent attempt хранит
-ровно один выбранный source `attempt-n` для каждого требования `join: all`.
-Выбранный artifact обязан существовать, принадлежать успешно завершённому
-attempt, иметь меньший номер, чем потребляющий attempt, и быть новее версии того
-же требования в предыдущем attempt этого Step. Эти входные номера фиксированы
-после публикации attempt и составляют часть fail-fast восстановления run.
+При создании и восстановлении attempt input обязан содержать ровно один source
+attempt для каждого Step в порядке его `depends-on`. Каждый source
+attempt обязан существовать, быть успешно завершённым, иметь меньший номер и
+быть свежее нижней границы target Step. Для каждого InputId из его `outputs`
+обязан существовать соответствующий artifact.
+
+Неполная, старая или противоречивая input group является ошибкой fail-fast.
+После публикации attempt выбранные source numbers неизменяемы.

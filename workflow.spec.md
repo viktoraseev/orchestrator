@@ -13,19 +13,20 @@
   собственный снимок workflow, поэтому изменение исходного шаблона не меняет
   уже начатое выполнение. Порядок описания steps сохраняется при
   материализации и является частью семантики workflow.
-- **Step** — узел с уникальным ID, Agent type, необязательной ссылкой на
-  YAML-шаблон prompt, `human: bool` и списком outputs. `join: all` опционален;
+- **Step** — узел с уникальным ID, необязательным `agent: <agent-id>`,
+  необязательной ссылкой на YAML-шаблон prompt, `human: bool` и списком outputs.
+  Без `agent` Step использует `default-agent` из config. `join: all` опционален;
   если он задан, это непустой список различных пар `step-id` и `artifact-id`.
-  Отсутствие join не создаёт join-derived activations. Outputs задаёт
-  разрешённые ArtifactIds, но не требует публиковать каждый из них. Отдельных
-  transitions, `when` и routing result нет.
+  Отсутствие join не создаёт join-derived activations. Outputs задаёт разрешённые
+  ArtifactIds, но не требует публиковать каждый из них. Отдельных transitions,
+  `when` и routing result нет.
 - **Artifact в graph** имеет ключ `(attempt-n, step-id, artifact-id)`. Все
   версии хранятся для истории. Для одной пары `(step-id, artifact-id)` graph
   выбирает версию с максимальным подходящим `attempt-n`; к требованиям join
   доступен только artifact успешно завершённого attempt.
 
-Все символические IDs, включая WorkflowId, StepId, ArtifactId, AgentTypeId и
-PromptId, соответствуют `[a-z]+(?:-[a-z]+)*`.
+Все символические IDs, включая WorkflowId, StepId, ArtifactId, AgentId,
+AgentTypeId и PromptId, соответствуют `[a-z]+(?:-[a-z]+)*`.
 
 ## Initial activation, joins и frontier
 
@@ -102,7 +103,9 @@ activations и частично удовлетворённые joins. Join ча�
   упорядоченную последовательность уникальных Steps;
 - что у любого Step join отсутствует либо является непустым `join: all`, outputs
   содержат уникальные ArtifactIds, а `human` является boolean;
-- существование и native-resume поддержку Agent type; существование,
+- что явный Agent Step существует, а при его отсутствии существует
+  `default-agent`; type, model и reasoning каждого выбранного Agent валидны по
+  registry `AgentType` и type поддерживает native resume; существование,
   materialization и валидность указанного prompt template;
 - уникальность пар в одном join, существование source step и объявление им
   требуемого ArtifactId в outputs;
@@ -113,8 +116,9 @@ activations и частично удовлетворённые joins. Join ча�
   Циклическая компонента без bootstrap-пути от initial activation недостижима;
 - допустимость outputs без consumers и отсутствия статически terminal Step.
 
-Содержимое Artifact — произвольные bytes и validation workflow его не разбирает.
-Во время выполнения статическая reachability повторно не вычисляется.
+Перед созданием run все выбранные Agents резолвятся и materialize’ятся в снимок
+workflow. Содержимое Artifact — произвольные bytes и validation workflow его не
+разбирает. Во время выполнения статическая reachability повторно не вычисляется.
 
 ## Durable input activation
 

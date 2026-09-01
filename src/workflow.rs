@@ -50,13 +50,13 @@ impl WorkflowId {
             })
     }
 
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct SymbolicId(String);
+pub(crate) struct SymbolicId(String);
 
 impl SymbolicId {
     fn parse(kind: &str, value: &str) -> Result<Self, String> {
@@ -74,7 +74,7 @@ impl SymbolicId {
         }
     }
 
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
@@ -101,19 +101,20 @@ struct RawStep {
 }
 
 #[derive(Clone, Debug)]
-struct Step {
-    id: SymbolicId,
-    agent: RawAgent,
-    prompt: Option<String>,
-    human: bool,
-    depends_on: Vec<SymbolicId>,
-    outputs: Vec<SymbolicId>,
+pub(crate) struct Step {
+    pub(crate) id: SymbolicId,
+    pub(crate) agent: RawAgent,
+    pub(crate) prompt: Option<String>,
+    pub(crate) human: bool,
+    pub(crate) depends_on: Vec<SymbolicId>,
+    pub(crate) outputs: Vec<SymbolicId>,
 }
 
 #[derive(Clone, Debug)]
-struct Workflow {
-    id: WorkflowId,
-    steps: Vec<Step>,
+pub(crate) struct Workflow {
+    pub(crate) id: WorkflowId,
+    pub(crate) max_parallel_agents: usize,
+    pub(crate) steps: Vec<Step>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,7 +172,12 @@ pub fn execute_validate_with_registry(
             &configured_workflow_id
         }
     };
-    let workflow = materialize(&root, workflow_id, &config.raw)?;
+    let workflow = materialize(
+        &root,
+        workflow_id,
+        &config.raw,
+        config.max_parallel_agents().get(),
+    )?;
     validate_graph(&workflow)?;
     Ok(format!("workflow {}: valid", workflow.id.as_str()))
 }
@@ -180,6 +186,7 @@ fn materialize(
     root: &Path,
     workflow_id: &WorkflowId,
     config: &RawConfig,
+    max_parallel_agents: usize,
 ) -> Result<Workflow, CommandError> {
     let path = workflow_path(root, workflow_id);
     require_regular_workflow(&path, workflow_id)?;
@@ -241,8 +248,70 @@ fn materialize(
     }
     Ok(Workflow {
         id: workflow_id.clone(),
+        max_parallel_agents,
         steps,
     })
+}
+
+pub(crate) fn materialize_for_lifecycle(
+    command: &ValidateCommand,
+    environment: &ProcessEnvironment,
+    registry: &dyn AgentRegistry,
+    context: &str,
+) -> Result<Workflow, CommandError> {
+    let root = resolve_state_root(environment, context)?;
+    let config = read_config(&root, context, registry)?;
+    let configured_workflow_id;
+    let workflow_id = match command {
+        ValidateCommand::Explicit(workflow_id) => workflow_id,
+        ValidateCommand::ConfiguredDefault => {
+            let Some(value) = &config.raw.default_workflow else {
+                return Err(CommandError::Syntax {
+                    context: format!(
+                        "{context}: передайте WorkflowId или настройте default-workflow"
+                    ),
+                });
+            };
+            configured_workflow_id = WorkflowId(value.clone());
+            &configured_workflow_id
+        }
+    };
+    materialize(
+        &root,
+        workflow_id,
+        &config.raw,
+        config.max_parallel_agents().get(),
+    )
+    .and_then(|workflow| {
+        validate_graph(&workflow)?;
+        Ok(workflow)
+    })
+    .map_err(|error| replace_context(error, context))
+}
+
+fn replace_context(error: CommandError, context: &str) -> CommandError {
+    let replace = |value: String| value.replacen("validate:", &format!("{context}:"), 1);
+    match error {
+        CommandError::Syntax { context: value } => CommandError::Syntax {
+            context: replace(value),
+        },
+        CommandError::Invalid { context: value } => CommandError::Invalid {
+            context: replace(value),
+        },
+        CommandError::NotFound { context: value } => CommandError::NotFound {
+            context: replace(value),
+        },
+        CommandError::Busy { context: value } => CommandError::Busy {
+            context: replace(value),
+        },
+        CommandError::Runtime {
+            context: value,
+            source,
+        } => CommandError::Runtime {
+            context: replace(value),
+            source,
+        },
+    }
 }
 
 fn workflow_path(root: &Path, workflow_id: &WorkflowId) -> PathBuf {

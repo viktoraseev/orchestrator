@@ -145,8 +145,14 @@ pub enum CommandError {
         /// Диагностика с контекстом команды.
         context: String,
     },
-    /// Состояние не удалось прочитать по причине ошибки ввода-вывода.
+    /// Run lock занят либо volatile control context недоступен.
     #[error("{context}")]
+    Busy {
+        /// Диагностика с контекстом lifecycle или control-команды.
+        context: String,
+    },
+    /// Состояние не удалось прочитать по причине ошибки ввода-вывода.
+    #[error("{context}: {source}")]
     Runtime {
         /// Диагностика с контекстом команды.
         context: String,
@@ -164,6 +170,7 @@ impl CommandError {
             Self::Syntax { .. } => 2,
             Self::Invalid { .. } => 3,
             Self::NotFound { .. } => 4,
+            Self::Busy { .. } => 5,
             Self::Runtime { .. } => 1,
         }
     }
@@ -201,6 +208,12 @@ struct Config {
 pub(crate) struct ConfigDocument {
     pub(crate) raw: RawConfig,
     effective: Config,
+}
+
+impl ConfigDocument {
+    pub(crate) const fn max_parallel_agents(&self) -> NonZeroUsize {
+        self.effective.max_parallel_agents
+    }
 }
 
 impl TryFrom<RawConfig> for Config {

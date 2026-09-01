@@ -6,6 +6,9 @@
 
 - `orchestrator start [<workflow-id>]` создаёт новый run выбранного workflow.
 - `orchestrator resume <run-id>` продолжает только явно указанный run. Выбор последнего run и другие формы implicit resume не поддерживаются.
+- `orchestrator run list` читает и перечисляет все durable runs без запуска Agent или изменения состояния.
+- `orchestrator run show <run-id>` читает один durable run и показывает его materialized Steps, attempts и вычисленный frontier.
+- `orchestrator run artifact <run-id> <attempt-n> <input-id>` пишет в stdout точные bytes опубликованного artifact выбранного attempt.
 - `orchestrator validate [<workflow-id>]` проверяет workflow без создания или изменения run.
 - `orchestrator config get <key>` читает одно значение конфигурации.
 - `orchestrator config set <key> <value>` атомарно изменяет одно значение.
@@ -141,6 +144,15 @@ Config обязан соответствовать `format.spec.md`. Невал�
 - Blocked run без запускаемой работы завершается с `1` и перечисляет частично удовлетворённые dependencies.
 
 - Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не делают run повреждённым и игнорируются по правилам `SPEC.md`.
+
+## `run list`, `run show` и `run artifact`
+
+- Все три `run`-команды являются read-only: они не получают Run lock, не создают control endpoint, не запускают Agent и не создают или изменяют файлы; занятый supervisor'ом run разрешено читать.
+- `run list` игнорирует нечисловые entries в `run/`, проверяет каждый числовой каталог как полную durable-модель и печатает по одной строке в порядке возрастания RunId: `run <run-id>: workflow=<workflow-id> state=<active|blocked|completed>`; отсутствие каталога `run/` или runs является успешным пустым выводом.
+- Производное состояние `active` означает наличие незавершённого attempt или непустого ready frontier и не утверждает, что сейчас существует процесс Agent; `completed` означает завершённую модель без нового frontier, остальные валидные состояния являются `blocked`.
+- `run show` первой строкой печатает ту же summary-строку, затем для каждого Step в порядке materialized workflow строку `step <step-id>: attempts=<n,...|->`, затем attempts в порядке глобального номера строками `attempt <n>: step=<step-id> state=<active|completed> session=<session-id|-> input=<n,...|->` и последней строкой `frontier: ready=<step-id,...|-> missing=<step-id,...|->`.
+- `run artifact` принимает десятичный глобальный attempt number и kebab-case InputId, требует существующий completed attempt и объявленный для его Step output, полностью проверяет durable run до открытия artifact и копирует файл в stdout без текстового преобразования или добавления newline.
+- Неизвестный явно выбранный RunId, attempt или InputId и artifact незавершённого attempt завершаются с `4`; синтаксически невалидный ID или attempt number завершается с `2`; противоречивая durable-модель завершается с `3`; до успешной полной проверки `run list`, `run show` и `run artifact` ничего не пишут в stdout.
 
 ## `validate`
 

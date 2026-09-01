@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,7 +15,8 @@ use orchestrator::{
     AgentSessionObserver, CommandError, ConfigCommand, ConfigKey, LifecycleCommand,
     LifecycleReporter, LifecycleSignals, ProcessAgentRegistry, ProcessEnvironment, RunId,
     TerminalMode, TerminationSignal, ValidateCommand, execute_config, execute_lifecycle,
-    execute_validate, send_attempt_completion, send_session_activation,
+    execute_run_list, execute_run_show, execute_validate, open_run_artifact,
+    send_attempt_completion, send_session_activation,
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -41,6 +43,10 @@ enum TopLevelCommand {
     Resume {
         run_id: String,
     },
+    Run {
+        #[command(subcommand)]
+        command: RunCliCommand,
+    },
     Session {
         #[command(subcommand)]
         command: SessionCliCommand,
@@ -48,6 +54,19 @@ enum TopLevelCommand {
     Attempt {
         #[command(subcommand)]
         command: AttemptCliCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RunCliCommand {
+    List,
+    Show {
+        run_id: String,
+    },
+    Artifact {
+        run_id: String,
+        attempt: String,
+        input_id: String,
     },
 }
 
@@ -204,11 +223,9 @@ fn main() -> ExitCode {
         orc_home: env::var_os("ORC_HOME"),
     };
     match dispatch(cli.command, &environment) {
-        Ok(Some(output)) => {
-            println!("{output}");
-            ExitCode::SUCCESS
-        }
-        Ok(None) => ExitCode::SUCCESS,
+        Ok(CommandOutput::Text(output)) => write_text_output(&output),
+        Ok(CommandOutput::Artifact(file)) => write_artifact_output(file),
+        Ok(CommandOutput::None) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::from(error.exit_code())
@@ -216,12 +233,45 @@ fn main() -> ExitCode {
     }
 }
 
+enum CommandOutput {
+    None,
+    Text(String),
+    Artifact(File),
+}
+
+fn write_text_output(output: &str) -> ExitCode {
+    if output.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    let mut stdout = io::stdout().lock();
+    match writeln!(stdout, "{output}").and_then(|()| stdout.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: output: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn write_artifact_output(mut file: File) -> ExitCode {
+    let mut stdout = io::stdout().lock();
+    match io::copy(&mut file, &mut stdout).and_then(|_| stdout.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: run artifact: не удалось записать stdout: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn dispatch(
     command: TopLevelCommand,
     environment: &ProcessEnvironment,
-) -> Result<Option<String>, CommandError> {
+) -> Result<CommandOutput, CommandError> {
     match command {
-        TopLevelCommand::Config { command } => dispatch_config(command, environment).map(Some),
+        TopLevelCommand::Config { command } => {
+            dispatch_config(command, environment).map(CommandOutput::Text)
+        }
         TopLevelCommand::Validate { workflow_id } => workflow_id
             .map_or_else(
                 || execute_validate(&ValidateCommand::configured_default(), environment),
@@ -230,28 +280,49 @@ fn dispatch(
                         .and_then(|command| execute_validate(&command, environment))
                 },
             )
-            .map(Some),
+            .map(CommandOutput::Text),
         TopLevelCommand::Start { workflow_id } => {
             let command = workflow_id.map_or_else(
                 || Ok(LifecycleCommand::start_configured_default()),
                 |workflow_id| LifecycleCommand::start_explicit(&workflow_id),
             )?;
             run_lifecycle(&command, environment)?;
-            Ok(None)
+            Ok(CommandOutput::None)
         }
         TopLevelCommand::Resume { run_id } => {
             run_lifecycle(
                 &LifecycleCommand::Resume(RunId::parse(&run_id)?),
                 environment,
             )?;
-            Ok(None)
+            Ok(CommandOutput::None)
         }
+        TopLevelCommand::Run { command } => match command {
+            RunCliCommand::List => execute_run_list(environment).map(CommandOutput::Text),
+            RunCliCommand::Show { run_id } => {
+                execute_run_show(parse_inspection_run_id(&run_id, "run show")?, environment)
+                    .map(CommandOutput::Text)
+            }
+            RunCliCommand::Artifact {
+                run_id,
+                attempt,
+                input_id,
+            } => {
+                let run_id = parse_inspection_run_id(&run_id, "run artifact")?;
+                let attempt = attempt.parse::<u64>().map_err(|_| CommandError::Syntax {
+                    context: format!(
+                        "run artifact: attempt '{attempt}' должен быть десятичным integer"
+                    ),
+                })?;
+                open_run_artifact(run_id, attempt, &input_id, environment)
+                    .map(CommandOutput::Artifact)
+            }
+        },
         TopLevelCommand::Session {
             command: SessionCliCommand::Activate { session_id },
         } => {
             let (endpoint, run_id, attempt) = control_context("session activate")?;
             send_session_activation(&endpoint, run_id, attempt, session_id)?;
-            Ok(None)
+            Ok(CommandOutput::None)
         }
         TopLevelCommand::Attempt {
             command: AttemptCliCommand::Complete { artifacts },
@@ -262,9 +333,18 @@ fn dispatch(
                 .map(|pair| (pair[0].clone(), PathBuf::from(&pair[1])))
                 .collect();
             send_attempt_completion(&endpoint, run_id, attempt, artifacts)?;
-            Ok(None)
+            Ok(CommandOutput::None)
         }
     }
+}
+
+fn parse_inspection_run_id(value: &str, command: &str) -> Result<RunId, CommandError> {
+    RunId::parse(value).map_err(|error| match error {
+        CommandError::Syntax { context } => CommandError::Syntax {
+            context: context.replacen("resume:", &format!("{command}:"), 1),
+        },
+        other => other,
+    })
 }
 
 fn run_lifecycle(

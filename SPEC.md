@@ -175,6 +175,12 @@ completion и временный файл атомарной записи не �
 type из materialized workflow и полного содержимого Agent attempt record;
 отдельный сохранённый status не используется.
 
+## Read-only inspection
+
+- Read-only inspection загружает materialized workflow, attempts и artifacts через ту же validation границу, что `resume`, но не получает Run lock, не создаёт control endpoint и не запускает Agent; поэтому оно может наблюдать run при удерживаемом другим supervisor lock и не меняет durable или volatile состояние.
+- Состояние, frontier, последняя session и соответствие artifacts вычисляются только из полной durable-модели; производный status не записывается, а orphan artifacts и временные файлы не становятся частью результата.
+- Выбор artifact использует точный глобальный attempt number и объявленный InputId завершённого Step, поэтому inspection никогда не заменяет запрошенную версию последней версией того же Step.
+
 ## Codex Agent type
 
 - Type `codex` принимает непустой `model` и `reasoning` из множества `low`, `medium`, `high`, `xhigh`, `max`; executable по умолчанию — `codex`.

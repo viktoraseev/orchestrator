@@ -1,6 +1,7 @@
 //! Lifecycle run, storage и control boundary; модуль не разбирает CLI и не знает протокол конкретного Agent type.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{
     AgentCancellation, AgentInput, AgentRegistry, AgentRunRequest, AttemptControl,
-    TerminationSignal,
+    BuiltinAgentRegistry, TerminationSignal,
 };
 use crate::config::{CommandError, ProcessEnvironment, RawAgent, resolve_state_root};
 use crate::workflow::{ValidateCommand, Workflow, materialize_for_lifecycle};
@@ -164,6 +165,198 @@ pub fn execute_lifecycle(
             resume(*run_id, environment, terminal, signals, registry, reporter)
         }
     }
+}
+
+/// Перечисляет validated durable runs в порядке возрастания [`RunId`].
+///
+/// Операция не получает Run lock и ничего не создаёт и не изменяет; см. Rule «Run list вычисляет состояние без побочных эффектов» в `features/run_inspection.feature`.
+///
+/// # Errors
+///
+/// Возвращает ошибку корня состояния, чтения либо первой противоречивой durable-модели; до успеха caller не получает частичный вывод.
+pub fn execute_run_list(environment: &ProcessEnvironment) -> Result<String, CommandError> {
+    let root = resolve_state_root(environment, "run list")?;
+    let run_root = root.join("run");
+    let entries = match fs::read_dir(&run_root) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(source) => {
+            return Err(runtime(
+                "run list",
+                format!("не удалось прочитать {}", run_root.display()),
+                source,
+            ));
+        }
+    };
+    let mut run_ids = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|source| runtime("run list", "не удалось прочитать durable entry", source))?;
+        if !entry
+            .file_type()
+            .map_err(|source| runtime("run list", "не удалось прочитать тип run entry", source))?
+            .is_dir()
+        {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Ok(value) = name.parse::<u64>() {
+            run_ids.push(RunId(value));
+        }
+    }
+    run_ids.sort_by_key(|run_id| run_id.0);
+    let runs = run_ids
+        .into_iter()
+        .map(|run_id| load_inspected_run(&root, run_id, "run list"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut output = String::new();
+    for run in &runs {
+        writeln!(
+            output,
+            "run {}: workflow={} state={}",
+            run.run_id,
+            run.workflow.workflow_id,
+            run.state().as_str()
+        )
+        .map_err(formatting_error)?;
+    }
+    if output.ends_with('\n') {
+        output.pop();
+    }
+    Ok(output)
+}
+
+/// Показывает materialized Steps, attempts и frontier одного validated durable run.
+///
+/// Операция не получает Run lock и не меняет состояние; см. Rule «Run show отображает validated read model» в `features/run_inspection.feature`.
+///
+/// # Errors
+///
+/// Возвращает `4` для неизвестного run и ошибку чтения или validation для противоречивой durable-модели.
+pub fn execute_run_show(
+    run_id: RunId,
+    environment: &ProcessEnvironment,
+) -> Result<String, CommandError> {
+    let root = resolve_state_root(environment, "run show")?;
+    let run = load_inspected_run(&root, run_id, "run show")?;
+    let mut output = String::new();
+    writeln!(
+        output,
+        "run {}: workflow={} state={}",
+        run.run_id,
+        run.workflow.workflow_id,
+        run.state().as_str()
+    )
+    .map_err(formatting_error)?;
+    for (step_index, step) in run.workflow.steps.iter().enumerate() {
+        let attempts = run
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.step_index == step_index)
+            .map(|attempt| attempt.number.to_string())
+            .collect::<Vec<_>>();
+        writeln!(
+            output,
+            "step {}: attempts={}",
+            step.id,
+            joined_or_dash(&attempts)
+        )
+        .map_err(formatting_error)?;
+    }
+    for attempt in &run.attempts {
+        let step = &run.workflow.steps[attempt.step_index];
+        let inputs = attempt
+            .record
+            .input
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>();
+        writeln!(
+            output,
+            "attempt {}: step={} state={} session={} input={}",
+            attempt.number,
+            step.id,
+            if attempt.record.is_completed() {
+                "completed"
+            } else {
+                "active"
+            },
+            attempt.record.last_session().unwrap_or("-"),
+            joined_or_dash(&inputs)
+        )
+        .map_err(formatting_error)?;
+    }
+    let ready = run
+        .frontier
+        .ready
+        .iter()
+        .map(|step_index| run.workflow.steps[*step_index].id.clone())
+        .collect::<Vec<_>>();
+    writeln!(
+        output,
+        "frontier: ready={} missing={}",
+        joined_or_dash(&ready),
+        joined_or_dash(&run.frontier.missing)
+    )
+    .map_err(formatting_error)?;
+    output.pop();
+    Ok(output)
+}
+
+/// Открывает точную durable-версию artifact для потокового копирования caller'ом.
+///
+/// Файл открывается только после полной validation run; см. Rule «Run artifact выбирает точную durable версию» в `features/run_inspection.feature`.
+///
+/// # Errors
+///
+/// Возвращает `2` для невалидного `InputId`, `4` для неизвестного run, attempt, output или незавершённого attempt и ошибку validation либо I/O для противоречивого состояния.
+pub fn open_run_artifact(
+    run_id: RunId,
+    attempt_number: u64,
+    input_id: &str,
+    environment: &ProcessEnvironment,
+) -> Result<File, CommandError> {
+    if !valid_id(input_id) {
+        return Err(CommandError::Syntax {
+            context: format!("run artifact: InputId '{input_id}' не соответствует kebab-case"),
+        });
+    }
+    let root = resolve_state_root(environment, "run artifact")?;
+    let run = load_inspected_run(&root, run_id, "run artifact")?;
+    let attempt = run
+        .attempts
+        .iter()
+        .find(|attempt| attempt.number == attempt_number)
+        .ok_or_else(|| CommandError::NotFound {
+            context: format!("run artifact: run {run_id}: attempt {attempt_number} не существует"),
+        })?;
+    let step = &run.workflow.steps[attempt.step_index];
+    if !attempt.record.is_completed() {
+        return Err(CommandError::NotFound {
+            context: format!(
+                "run artifact: run {run_id}: attempt {attempt_number} не опубликовал artifacts"
+            ),
+        });
+    }
+    if !step.outputs.iter().any(|output| output == input_id) {
+        return Err(CommandError::NotFound {
+            context: format!(
+                "run artifact: run {run_id}: InputId '{input_id}' не объявлен attempt {attempt_number}"
+            ),
+        });
+    }
+    let path = run
+        .directory
+        .join(format!("{attempt_number}.{}.{input_id}.artifact", step.id));
+    File::open(&path).map_err(|source| {
+        runtime(
+            "run artifact",
+            format!("не удалось открыть {}", path.display()),
+            source,
+        )
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -777,6 +970,134 @@ fn observe_batch_signal(execution: &SchedulerExecution<'_>, outcome: &mut BatchO
 struct Frontier {
     ready: Vec<usize>,
     missing: Vec<String>,
+}
+
+struct InspectedRun {
+    run_id: RunId,
+    directory: PathBuf,
+    workflow: MaterializedWorkflow,
+    attempts: Vec<DurableAttempt>,
+    frontier: Frontier,
+}
+
+#[derive(Clone, Copy)]
+enum InspectedRunState {
+    Active,
+    Blocked,
+    Completed,
+}
+
+impl InspectedRunState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Blocked => "blocked",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+impl InspectedRun {
+    fn state(&self) -> InspectedRunState {
+        if self
+            .attempts
+            .iter()
+            .any(|attempt| !attempt.record.is_completed())
+            || !self.frontier.ready.is_empty()
+        {
+            InspectedRunState::Active
+        } else if self.frontier.missing.is_empty() {
+            InspectedRunState::Completed
+        } else {
+            InspectedRunState::Blocked
+        }
+    }
+}
+
+fn load_inspected_run(
+    root: &Path,
+    run_id: RunId,
+    context: &str,
+) -> Result<InspectedRun, CommandError> {
+    let directory = root.join("run").join(run_id.to_string());
+    if !directory.is_dir() {
+        return Err(CommandError::NotFound {
+            context: format!("{context}: run {run_id} не существует"),
+        });
+    }
+    let spec_path = directory.join("spec.yaml");
+    if !spec_path.is_file() {
+        return Err(CommandError::Invalid {
+            context: format!(
+                "{context}: run {run_id}: spec.yaml отсутствует или не является regular file"
+            ),
+        });
+    }
+    let workflow: MaterializedWorkflow = read_yaml(&spec_path, context)?;
+    let attempts = load_attempts(&directory, &workflow, &BuiltinAgentRegistry, run_id)
+        .map_err(|error| recontextualize(error, context))?;
+    let frontier =
+        compute_frontier(&workflow, &attempts).map_err(|error| recontextualize(error, context))?;
+    Ok(InspectedRun {
+        run_id,
+        directory,
+        workflow,
+        attempts,
+        frontier,
+    })
+}
+
+fn recontextualize(error: CommandError, context: &str) -> CommandError {
+    fn replace(value: String, context: &str) -> String {
+        if let Some(suffix) = value.strip_prefix("resume:") {
+            format!("{context}:{suffix}")
+        } else {
+            value
+        }
+    }
+    match error {
+        CommandError::Syntax { context: value } => CommandError::Syntax {
+            context: replace(value, context),
+        },
+        CommandError::Invalid { context: value } => CommandError::Invalid {
+            context: replace(value, context),
+        },
+        CommandError::NotFound { context: value } => CommandError::NotFound {
+            context: replace(value, context),
+        },
+        CommandError::Busy { context: value } => CommandError::Busy {
+            context: replace(value, context),
+        },
+        CommandError::Interrupted {
+            context: value,
+            exit_code,
+        } => CommandError::Interrupted {
+            context: replace(value, context),
+            exit_code,
+        },
+        CommandError::Runtime {
+            context: value,
+            source,
+        } => CommandError::Runtime {
+            context: replace(value, context),
+            source,
+        },
+    }
+}
+
+fn joined_or_dash(values: &[String]) -> String {
+    if values.is_empty() {
+        "-".to_owned()
+    } else {
+        values.join(",")
+    }
+}
+
+fn formatting_error(source: std::fmt::Error) -> CommandError {
+    CommandError::Runtime {
+        context: "run inspection: не удалось сформировать вывод".to_owned(),
+        source: std::io::Error::other(source),
+    }
 }
 
 fn compute_frontier(

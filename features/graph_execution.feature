@@ -34,6 +34,50 @@ Feature: Выполнение workflow graph
       Then lifecycle завершается с кодом 0
       And join Agent получает inputs left:shared и right:shared
 
+  @workflow:initial-activation-dependencies-и-frontier @workflow:циклы-terminal-и-blocked-run @spec:создание-и-восстановление-agent-attempt @cli:resume
+  Rule: Циклический workflow повторно активирует Steps по свежим artifacts
+
+    Scenario: Первый повторный обход использует feedback вместо bootstrap input
+      Given подготовлен циклический workflow a → b → c → a
+      When цикл доходит до незавершённой повторной activation a
+      Then lifecycle завершается с кодом 1
+      And attempts созданы как 0 a, 1 b, 2 c, 3 a
+      And bootstrap a получает пустой input, а повторный a получает input 2
+      And каждый завершённый Step передаёт следующему свежий artifact
+      And lifecycle не сообщает о завершении run
+
+    Scenario: Resume продолжает повторную activation и следующий обход без дубликатов
+      Given подготовлен циклический workflow a → b → c → a
+      When незавершённая повторная activation a продолжается через resume
+      Then lifecycle завершается с кодом 1
+      And resume запускает attempts 3 a, 4 b
+      And следующий b получает input 3
+      And attempts первого обхода и их artifacts не изменены
+
+  @workflow:циклы-terminal-и-blocked-run @workflow:initial-activation-dependencies-и-frontier @cli:resume @cli:коды-завершения
+  Rule: Частично удовлетворённая dependency group блокирует run детерминированно
+
+    Scenario: Повторный resume сохраняет blocked run без побочных эффектов
+      Given подготовлен durable run с частично удовлетворёнными dependency groups
+      When blocked run дважды продолжается через lifecycle API
+      Then оба resume завершаются с кодом 1 и одинаковой диагностикой
+      And диагностика перечисляет отсутствующие source Steps c, b
+      And Agent не запускался и durable run не изменился
+
+    Scenario: Полная dependency group создаёт ровно один target attempt
+      Given подготовлен durable run с полностью удовлетворённой dependency group
+      When готовый target продолжается через lifecycle API
+      Then lifecycle завершается с кодом 1
+      And создан ровно один join attempt с input 1, 2
+
+    @process
+    Scenario: CLI возвращает стабильную blocked-диагностику
+      Given подготовлен durable run с частично удовлетворёнными dependency groups
+      And process Agent не должен запускаться
+      When blocked run продолжается через CLI
+      Then lifecycle завершается с кодом 1
+      And stderr сообщает blocked и отсутствующие source Steps c, b
+
   @workflow:планирование @spec:control-endpoint-и-события @spec:блокировка-run @cli:коды-завершения
   Rule: Non-human attempts выполняются параллельно под общим лимитом
 

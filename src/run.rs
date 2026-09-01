@@ -251,18 +251,41 @@ struct RunGuard {
 
 impl RunGuard {
     fn acquire(directory: PathBuf, context: &str) -> Result<Self, CommandError> {
+        Self::open(directory, context, true, None)
+    }
+
+    fn acquire_existing(directory: PathBuf, run_id: RunId) -> Result<Self, CommandError> {
+        Self::open(
+            directory,
+            &format!("resume: run {run_id}"),
+            false,
+            Some(run_id),
+        )
+    }
+
+    fn open(
+        directory: PathBuf,
+        context: &str,
+        create: bool,
+        run_id: Option<RunId>,
+    ) -> Result<Self, CommandError> {
         let lock_path = directory.join("active.lock");
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(create)
             .truncate(false)
             .open(&lock_path)
             .map_err(|source| {
-                runtime(
-                    context,
-                    format!("не удалось открыть {}", lock_path.display()),
-                    source,
+                run_id.map_or_else(
+                    || {
+                        runtime(
+                            context,
+                            format!("не удалось открыть {}", lock_path.display()),
+                            source,
+                        )
+                    },
+                    |id| invalid_run(id, "active.lock отсутствует или недоступен"),
                 )
             })?;
         FileExt::try_lock_exclusive(&lock).map_err(|source| {
@@ -347,8 +370,15 @@ fn resume(
             context: format!("resume: run {run_id} не существует"),
         });
     }
-    let guard = RunGuard::acquire(directory, &format!("resume: run {run_id}"))?;
-    let candidate: MaterializedWorkflow = read_yaml(&guard.directory.join("spec.yaml"), "resume")?;
+    let guard = RunGuard::acquire_existing(directory, run_id)?;
+    let spec_path = guard.directory.join("spec.yaml");
+    if !spec_path.is_file() {
+        return Err(invalid_run(
+            run_id,
+            "spec.yaml отсутствует или не является regular file",
+        ));
+    }
+    let candidate: MaterializedWorkflow = read_yaml(&spec_path, "resume")?;
     validate_materialized(&candidate, registry, run_id)?;
     let attempts = load_attempts(&guard.directory, &candidate, registry, run_id)?;
     let result = if is_completed(&candidate, &attempts)? {
@@ -811,11 +841,7 @@ fn publish_ready_attempts(
     ready: &[usize],
     context: &str,
 ) -> Result<(), CommandError> {
-    let mut next = attempts
-        .iter()
-        .map(|attempt| attempt.number)
-        .max()
-        .unwrap_or(0)
+    let mut next = maximum_reserved_attempt_number(&guard.directory, attempts, run_id)?
         .checked_add(1)
         .ok_or_else(|| invalid_run(run_id, "attempt number overflow"))?;
     for &step_index in ready {
@@ -857,6 +883,50 @@ fn publish_ready_attempts(
             .ok_or_else(|| invalid_run(run_id, "attempt number overflow"))?;
     }
     Ok(())
+}
+
+fn maximum_reserved_attempt_number(
+    directory: &Path,
+    attempts: &[DurableAttempt],
+    run_id: RunId,
+) -> Result<u64, CommandError> {
+    let mut maximum = attempts
+        .iter()
+        .map(|attempt| attempt.number)
+        .max()
+        .unwrap_or(0);
+    for entry in fs::read_dir(directory).map_err(|source| {
+        runtime(
+            "resume",
+            format!("не удалось прочитать {}", directory.display()),
+            source,
+        )
+    })? {
+        let entry = entry
+            .map_err(|source| runtime("resume", "не удалось прочитать durable entry", source))?;
+        let name = entry.file_name();
+        if let Some(number) = reserved_attempt_number(&name.to_string_lossy()) {
+            maximum = maximum.max(number);
+        }
+    }
+    if maximum == u64::MAX {
+        return Err(invalid_run(run_id, "attempt number overflow"));
+    }
+    Ok(maximum)
+}
+
+fn reserved_attempt_number(name: &str) -> Option<u64> {
+    let durable = name.ends_with(".attempt.yaml") || name.ends_with(".artifact");
+    let temporary = name.starts_with('.')
+        && name.strip_suffix(".tmp").is_some()
+        && (name.contains(".attempt.yaml.") || name.contains(".artifact."));
+    if !durable && !temporary {
+        return None;
+    }
+    name.trim_start_matches('.')
+        .split('.')
+        .next()
+        .and_then(|number| number.parse().ok())
 }
 
 fn reserve_run(root: &Path) -> Result<(RunId, RunGuard), CommandError> {
@@ -1352,14 +1422,16 @@ fn validate_materialized(
             .map_err(|context| invalid_run(run_id, &context))?;
     }
     for step in &workflow.steps {
-        if step
-            .depends_on
-            .iter()
-            .any(|dependency| !ids.contains(dependency.as_str()))
+        let dependencies: HashSet<&str> = step.depends_on.iter().map(String::as_str).collect();
+        if dependencies.len() != step.depends_on.len()
+            || step
+                .depends_on
+                .iter()
+                .any(|dependency| !ids.contains(dependency.as_str()))
         {
             return Err(invalid_run(
                 run_id,
-                "depends-on ссылается на неизвестный Step",
+                "depends-on повторяется или ссылается на неизвестный Step",
             ));
         }
     }
@@ -1402,6 +1474,16 @@ fn load_attempts(
             .iter()
             .position(|step| step.id == step_id)
             .ok_or_else(|| invalid_run(run_id, "attempt ссылается на неизвестный Step"))?;
+        if !entry
+            .file_type()
+            .map_err(|source| runtime("resume", "не удалось прочитать тип durable entry", source))?
+            .is_file()
+        {
+            return Err(invalid_run(
+                run_id,
+                "attempt record не является regular file",
+            ));
+        }
         let record: AttemptRecord = read_yaml(&entry.path(), "resume")?;
         attempts.push(DurableAttempt {
             number,
@@ -1442,6 +1524,7 @@ fn load_attempts(
         let step = &workflow.steps[attempt.step_index];
         validate_record(&attempt.record, step, attempt.number, directory, run_id)?;
         validate_attempt_input(workflow, &attempts, attempt, run_id)?;
+        prepare_agent_input(directory, workflow, attempt, run_id)?;
     }
     Ok(attempts)
 }

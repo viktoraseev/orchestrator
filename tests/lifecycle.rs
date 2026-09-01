@@ -20,7 +20,9 @@ struct LifecycleWorld {
     root: Option<TempDir>,
     run_id: Option<String>,
     observed: Option<Observed>,
+    prior_observed: Option<Observed>,
     calls: Vec<Call>,
+    durable_snapshot: Vec<(String, Vec<u8>)>,
     process_agent: Option<PathBuf>,
     process_gate: Option<PathBuf>,
     process_ready: Option<PathBuf>,
@@ -30,7 +32,7 @@ struct LifecycleWorld {
     shutdown_elapsed: Option<Duration>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Observed {
     exit_code: u8,
     lines: Vec<String>,
@@ -332,6 +334,146 @@ fn parallel_diamond_workflow(world: &mut LifecycleWorld) {
         "default-agent: main\nmax-parallel-agents: 2\nagents:\n  main:\n    type: codex\n    model: model\n    reasoning: high\n",
     )
     .expect("parallel config must be written");
+}
+
+#[given("подготовлен циклический workflow a → b → c → a")]
+fn cyclic_workflow(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: a\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [c]\n    outputs: [result]\n  - id: b\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [a]\n    outputs: [result]\n  - id: c\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [b]\n    outputs: [result]\n",
+        None,
+    );
+}
+
+#[given("подготовлен durable run с частично удовлетворёнными dependency groups")]
+fn partially_satisfied_durable_run(world: &mut LifecycleWorld) {
+    prepare_durable_run(
+        world,
+        "workflow-id: delivery\nmax-parallel-agents: 5\nsteps:\n- id: a\n  agent: &agent\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: [b, c]\n  outputs: []\n- id: b\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [a, c]\n  outputs: []\n- id: c\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [a, b]\n  outputs: []\n",
+        &[(
+            "0.a.attempt.yaml",
+            "input: []\nevents:\n- type: completed\n",
+        )],
+    );
+}
+
+#[given("подготовлен durable run с полностью удовлетворённой dependency group")]
+fn fully_satisfied_durable_run(world: &mut LifecycleWorld) {
+    prepare_durable_run(
+        world,
+        "workflow-id: delivery\nmax-parallel-agents: 5\nsteps:\n- id: root\n  agent: &agent\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: []\n  outputs: []\n- id: left\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [root]\n  outputs: []\n- id: right\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [root]\n  outputs: []\n- id: join\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [left, right]\n  outputs: []\n",
+        &[
+            (
+                "0.root.attempt.yaml",
+                "input: []\nevents:\n- type: completed\n",
+            ),
+            (
+                "1.left.attempt.yaml",
+                "input:\n- 0\nevents:\n- type: completed\n",
+            ),
+            (
+                "2.right.attempt.yaml",
+                "input:\n- 0\nevents:\n- type: completed\n",
+            ),
+        ],
+    );
+}
+
+#[given("подготовлен завершённый линейный durable run")]
+fn completed_linear_durable_run(world: &mut LifecycleWorld) {
+    linear_workflow(world);
+    run_start(
+        world,
+        [
+            Behavior::Complete {
+                input_id: "result".to_owned(),
+                bytes: b"hello".to_vec(),
+            },
+            Behavior::CompleteEmpty,
+        ],
+    );
+    world.calls.clear();
+    world.observed = None;
+}
+
+#[given(expr = "durable-модель повреждена как {string}")]
+#[allow(clippy::needless_pass_by_value)]
+fn corrupt_durable_model(world: &mut LifecycleWorld, corruption: String) {
+    let directory = run_directory(world);
+    match corruption.as_str() {
+        "отсутствующий spec" => {
+            fs::remove_file(directory.join("spec.yaml")).expect("spec must be removed");
+        }
+        "невалидный spec YAML" => {
+            fs::write(directory.join("spec.yaml"), b"steps: [")
+                .expect("invalid spec must be written");
+        }
+        "невалидный attempt record" => {
+            fs::write(directory.join("1.target.attempt.yaml"), b"events: [")
+                .expect("invalid attempt must be written");
+        }
+        "отсутствующий completed artifact" => {
+            fs::remove_file(directory.join("0.source.result.artifact"))
+                .expect("completed artifact must be removed");
+        }
+        "дополнительный completed artifact" => {
+            fs::write(directory.join("0.source.extra.artifact"), b"extra")
+                .expect("extra artifact must be written");
+        }
+        "противоречивый input" => {
+            fs::write(
+                directory.join("1.target.attempt.yaml"),
+                b"input:\n- 1\nevents:\n- type: completed\n",
+            )
+            .expect("contradictory input must be written");
+        }
+        "повторный глобальный attempt number" => {
+            fs::write(
+                directory.join("1.source.attempt.yaml"),
+                b"input: []\nevents:\n- type: completed\n",
+            )
+            .expect("duplicate attempt number must be written");
+        }
+        "невалидный content artifact" => {
+            fs::write(directory.join("0.source.result.artifact"), [0xff])
+                .expect("invalid content artifact must be written");
+        }
+        other => panic!("unknown durable corruption {other}"),
+    }
+}
+
+#[given("подготовлен незавершённый durable run с crash leftovers")]
+fn unfinished_run_with_crash_leftovers(world: &mut LifecycleWorld) {
+    prepare_workflow(world, &["result"]);
+    run_start(world, [Behavior::ReturnWithoutCompletion]);
+    let directory = run_directory(world);
+    fs::write(directory.join("0.first.result.artifact"), b"partial")
+        .expect("unfinished artifact must be written");
+    fs::write(directory.join("99.ghost.result.artifact"), b"orphan")
+        .expect("orphan artifact must be written");
+    fs::write(
+        directory.join(".0.first.attempt.yaml.123.0.tmp"),
+        b"temporary",
+    )
+    .expect("temporary file must be written");
+    world.calls.clear();
+    world.observed = None;
+    world.durable_snapshot = durable_snapshot(world);
+}
+
+#[given("подготовлен ready durable run с orphan artifact 99")]
+fn ready_run_with_orphan_artifact(world: &mut LifecycleWorld) {
+    fully_satisfied_durable_run(world);
+    fs::write(
+        run_directory(world).join("99.ghost.result.artifact"),
+        b"orphan",
+    )
+    .expect("orphan artifact must be written");
+}
+
+#[given("process Agent не должен запускаться")]
+fn process_agent_must_not_run(world: &mut LifecycleWorld) {
+    prepare_process_agent(world, "#!/bin/sh\nexit 99\n");
 }
 
 #[given("process branch Agents настроены для fail-fast")]
@@ -743,6 +885,125 @@ fn complete_shared_outputs(world: &mut LifecycleWorld) {
             Behavior::CompleteEmpty,
         ],
     );
+}
+
+#[when("цикл доходит до незавершённой повторной activation a")]
+fn cycle_reaches_unfinished_repeated_a(world: &mut LifecycleWorld) {
+    run_start(
+        world,
+        [
+            Behavior::Complete {
+                input_id: "result".to_owned(),
+                bytes: b"a0".to_vec(),
+            },
+            Behavior::Complete {
+                input_id: "result".to_owned(),
+                bytes: b"b1".to_vec(),
+            },
+            Behavior::Complete {
+                input_id: "result".to_owned(),
+                bytes: b"c2".to_vec(),
+            },
+            Behavior::ReturnWithoutCompletion,
+        ],
+    );
+}
+
+#[when("незавершённая повторная activation a продолжается через resume")]
+fn resume_unfinished_repeated_a(world: &mut LifecycleWorld) {
+    cycle_reaches_unfinished_repeated_a(world);
+    let root = world.root.as_ref().expect("scenario must define root");
+    let registry = FakeAgentRegistry::new(
+        root.path().to_owned(),
+        [
+            Behavior::Complete {
+                input_id: "result".to_owned(),
+                bytes: b"a3".to_vec(),
+            },
+            Behavior::ReturnWithoutCompletion,
+        ],
+    );
+    let run_id = world.run_id.as_ref().expect("scenario must define run ID");
+    let command =
+        LifecycleCommand::Resume(orchestrator::RunId::parse(run_id).expect("run ID must be valid"));
+    let mut reporter = VecReporter::default();
+    let result = execute_lifecycle(
+        &command,
+        &environment(root),
+        TerminalMode::Unavailable,
+        &LifecycleSignals::default(),
+        &registry,
+        &mut reporter,
+    );
+    world.calls = registry
+        .calls
+        .into_inner()
+        .expect("call log must be available");
+    world.observed = Some(observe(result, reporter));
+}
+
+#[when("blocked run дважды продолжается через lifecycle API")]
+fn resume_blocked_run_twice(world: &mut LifecycleWorld) {
+    world.durable_snapshot = durable_snapshot(world);
+    let (first, first_calls) = resume_with_fake(world, []);
+    let (second, second_calls) = resume_with_fake(world, []);
+    world.prior_observed = Some(first);
+    world.observed = Some(second);
+    world.calls = first_calls.into_iter().chain(second_calls).collect();
+}
+
+#[when("готовый target продолжается через lifecycle API")]
+fn resume_ready_target(world: &mut LifecycleWorld) {
+    let (observed, calls) = resume_with_fake(world, [Behavior::ReturnWithoutCompletion]);
+    world.observed = Some(observed);
+    world.calls = calls;
+}
+
+#[when("blocked run продолжается через CLI")]
+fn resume_blocked_run_through_cli(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let agent = world
+        .process_agent
+        .as_ref()
+        .expect("scenario must define process Agent");
+    let output = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["resume", "0"])
+        .env("ORC_HOME", root.path())
+        .env("ORC_AGENT_COMMAND", agent)
+        .output()
+        .expect("orchestrator resume must run");
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines: String::from_utf8(output.stdout)
+            .expect("stdout must be UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
+#[when("повреждённый run продолжается через lifecycle API")]
+fn resume_corrupted_run(world: &mut LifecycleWorld) {
+    world.durable_snapshot = durable_snapshot(world);
+    let (observed, calls) = resume_with_fake(world, []);
+    world.observed = Some(observed);
+    world.calls = calls;
+}
+
+#[when("run с crash leftovers продолжается через lifecycle API")]
+fn resume_run_with_crash_leftovers(world: &mut LifecycleWorld) {
+    let (observed, calls) = resume_with_fake(world, [Behavior::ReturnWithoutCompletion]);
+    world.observed = Some(observed);
+    world.calls = calls;
+}
+
+#[when("ready run с orphan artifact продолжается через lifecycle API")]
+fn resume_ready_run_with_orphan(world: &mut LifecycleWorld) {
+    let (observed, calls) = resume_with_fake(world, [Behavior::ReturnWithoutCompletion]);
+    world.observed = Some(observed);
+    world.calls = calls;
 }
 
 #[when(expr = "неизвестный run {word} продолжается через lifecycle API")]
@@ -1194,6 +1455,205 @@ fn join_receives_distinct_inputs(world: &mut LifecycleWorld) {
     assert_eq!(keys, [("left", "shared"), ("right", "shared")]);
 }
 
+#[then("attempts созданы как 0 a, 1 b, 2 c, 3 a")]
+fn first_cycle_attempt_order(world: &mut LifecycleWorld) {
+    assert_eq!(
+        attempt_record_names(world),
+        [
+            "0.a.attempt.yaml",
+            "1.b.attempt.yaml",
+            "2.c.attempt.yaml",
+            "3.a.attempt.yaml",
+        ]
+    );
+    let calls: Vec<(&str, u64)> = world
+        .calls
+        .iter()
+        .map(|call| (call.step_id.as_str(), call.attempt))
+        .collect();
+    assert_eq!(calls, [("a", 0), ("b", 1), ("c", 2), ("a", 3)]);
+}
+
+#[then("bootstrap a получает пустой input, а повторный a получает input 2")]
+fn repeated_a_uses_feedback_input(world: &mut LifecycleWorld) {
+    let directory = run_directory(world);
+    let bootstrap = fs::read_to_string(directory.join("0.a.attempt.yaml"))
+        .expect("bootstrap attempt must be readable");
+    let repeated = fs::read_to_string(directory.join("3.a.attempt.yaml"))
+        .expect("repeated attempt must be readable");
+    assert!(bootstrap.contains("input: []"));
+    assert!(repeated.contains("input:\n- 2"));
+    assert!(world.calls[0].inputs.is_empty());
+    assert_eq!(
+        input_versions(&world.calls[3]),
+        ["c:result:2.c.result.artifact"]
+    );
+}
+
+#[then("каждый завершённый Step передаёт следующему свежий artifact")]
+fn cycle_passes_fresh_artifacts(world: &mut LifecycleWorld) {
+    assert_eq!(
+        input_versions(&world.calls[1]),
+        ["a:result:0.a.result.artifact"]
+    );
+    assert_eq!(
+        input_versions(&world.calls[2]),
+        ["b:result:1.b.result.artifact"]
+    );
+    assert_eq!(
+        input_versions(&world.calls[3]),
+        ["c:result:2.c.result.artifact"]
+    );
+}
+
+#[then("lifecycle не сообщает о завершении run")]
+fn does_not_report_completed(world: &mut LifecycleWorld) {
+    assert!(
+        world
+            .observed()
+            .lines
+            .iter()
+            .all(|line| !line.contains(": completed"))
+    );
+}
+
+#[then("resume запускает attempts 3 a, 4 b")]
+fn resume_runs_repeated_a_and_next_b(world: &mut LifecycleWorld) {
+    let calls: Vec<(&str, u64)> = world
+        .calls
+        .iter()
+        .map(|call| (call.step_id.as_str(), call.attempt))
+        .collect();
+    assert_eq!(calls, [("a", 3), ("b", 4)]);
+    assert_eq!(
+        attempt_record_names(world),
+        [
+            "0.a.attempt.yaml",
+            "1.b.attempt.yaml",
+            "2.c.attempt.yaml",
+            "3.a.attempt.yaml",
+            "4.b.attempt.yaml",
+        ]
+    );
+}
+
+#[then("следующий b получает input 3")]
+fn next_b_uses_repeated_a(world: &mut LifecycleWorld) {
+    let record = fs::read_to_string(run_directory(world).join("4.b.attempt.yaml"))
+        .expect("next b attempt must be readable");
+    assert!(record.contains("input:\n- 3"));
+    assert_eq!(
+        input_versions(&world.calls[1]),
+        ["a:result:3.a.result.artifact"]
+    );
+}
+
+#[then("attempts первого обхода и их artifacts не изменены")]
+fn first_cycle_history_is_immutable(world: &mut LifecycleWorld) {
+    let directory = run_directory(world);
+    for (name, input, artifact) in [
+        ("0.a", "input: []", b"a0".as_slice()),
+        ("1.b", "input:\n- 0", b"b1".as_slice()),
+        ("2.c", "input:\n- 1", b"c2".as_slice()),
+    ] {
+        let record = fs::read_to_string(directory.join(format!("{name}.attempt.yaml")))
+            .expect("historical attempt must be readable");
+        assert!(record.contains(input));
+        assert!(record.trim_end().ends_with("type: completed"));
+        assert_eq!(
+            fs::read(directory.join(format!("{name}.result.artifact")))
+                .expect("historical artifact must be readable"),
+            artifact
+        );
+    }
+}
+
+#[then("оба resume завершаются с кодом 1 и одинаковой диагностикой")]
+fn repeated_blocked_resume_is_stable(world: &mut LifecycleWorld) {
+    let first = world
+        .prior_observed
+        .as_ref()
+        .expect("scenario must execute first resume");
+    assert_eq!(first.exit_code, 1);
+    assert_eq!(world.observed().exit_code, 1);
+    assert_eq!(first.error, world.observed().error);
+}
+
+#[then("диагностика перечисляет отсутствующие source Steps c, b")]
+fn blocked_diagnostic_lists_missing_sources(world: &mut LifecycleWorld) {
+    let error = world
+        .observed()
+        .error
+        .as_deref()
+        .expect("blocked resume must return diagnostics");
+    assert!(error.contains("blocked: отсутствуют source Steps c, b"));
+    assert_eq!(error.matches("source Steps").count(), 1);
+}
+
+#[then("Agent не запускался и durable run не изменился")]
+fn blocked_resume_has_no_side_effects(world: &mut LifecycleWorld) {
+    assert!(world.calls.is_empty());
+    assert_eq!(durable_snapshot(world), world.durable_snapshot);
+}
+
+#[then("создан ровно один join attempt с input 1, 2")]
+fn exactly_one_ready_join_is_published(world: &mut LifecycleWorld) {
+    assert_eq!(
+        attempt_record_names(world),
+        [
+            "0.root.attempt.yaml",
+            "1.left.attempt.yaml",
+            "2.right.attempt.yaml",
+            "3.join.attempt.yaml",
+        ]
+    );
+    let record = fs::read_to_string(run_directory(world).join("3.join.attempt.yaml"))
+        .expect("join attempt must be readable");
+    assert!(record.contains("input:\n- 1\n- 2"));
+    assert_eq!(world.calls.len(), 1);
+    assert_eq!(world.calls[0].step_id, "join");
+    assert_eq!(world.calls[0].attempt, 3);
+}
+
+#[then("stderr сообщает blocked и отсутствующие source Steps c, b")]
+fn cli_reports_blocked_sources(world: &mut LifecycleWorld) {
+    assert_eq!(
+        world.observed().error.as_deref(),
+        Some(
+            "error: resume: run 0: blocked: отсутствуют source Steps c, b: workflow frontier blocked\n"
+        )
+    );
+}
+
+#[then("Agent не запускался и повреждённый durable run не изменился")]
+fn invalid_run_has_no_side_effects(world: &mut LifecycleWorld) {
+    assert!(world.calls.is_empty());
+    assert_eq!(durable_snapshot(world), world.durable_snapshot);
+}
+
+#[then("resume продолжает исходный unfinished attempt")]
+fn resume_continues_original_unfinished_attempt(world: &mut LifecycleWorld) {
+    assert_eq!(world.calls.len(), 1);
+    assert_eq!(world.calls[0].step_id, "first");
+    assert_eq!(world.calls[0].attempt, 0);
+}
+
+#[then("crash leftovers остались побайтово неизменными")]
+fn crash_leftovers_remain_unchanged(world: &mut LifecycleWorld) {
+    assert_eq!(durable_snapshot(world), world.durable_snapshot);
+}
+
+#[then("target получает следующий свободный глобальный номер 100")]
+fn target_skips_orphan_attempt_number(world: &mut LifecycleWorld) {
+    assert_eq!(world.calls.len(), 1);
+    assert_eq!(world.calls[0].step_id, "join");
+    assert_eq!(world.calls[0].attempt, 100);
+    let record = fs::read_to_string(run_directory(world).join("100.join.attempt.yaml"))
+        .expect("join attempt must be readable");
+    assert!(record.contains("input:\n- 1\n- 2"));
+    assert!(!run_directory(world).join("3.join.attempt.yaml").exists());
+}
+
 #[then("одновременно работали ровно 2 branch Agents")]
 fn exactly_two_parallel_agents(world: &mut LifecycleWorld) {
     assert_eq!(world.max_concurrency, 2);
@@ -1329,6 +1789,19 @@ fn reports_already_completed(world: &mut LifecycleWorld) {
             .iter()
             .any(|line| line.contains("already completed"))
     );
+}
+
+fn prepare_durable_run(world: &mut LifecycleWorld, spec: &str, attempts: &[(&str, &str)]) {
+    let root = TempDir::new().expect("test root must be created");
+    let directory = root.path().join("run/0");
+    fs::create_dir_all(&directory).expect("run directory must be created");
+    fs::write(directory.join("spec.yaml"), spec).expect("materialized workflow must be written");
+    fs::write(directory.join("active.lock"), []).expect("run lock file must be written");
+    for (name, record) in attempts {
+        fs::write(directory.join(name), record).expect("attempt record must be written");
+    }
+    world.root = Some(root);
+    world.run_id = Some("0".to_owned());
 }
 
 fn prepare_workflow(world: &mut LifecycleWorld, outputs: &[&str]) {
@@ -1472,6 +1945,31 @@ fn run_start(world: &mut LifecycleWorld, behaviors: impl IntoIterator<Item = Beh
     run_start_with_terminal(world, behaviors, TerminalMode::Unavailable);
 }
 
+fn resume_with_fake(
+    world: &LifecycleWorld,
+    behaviors: impl IntoIterator<Item = Behavior>,
+) -> (Observed, Vec<Call>) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let registry = FakeAgentRegistry::new(root.path().to_owned(), behaviors);
+    let run_id = world.run_id.as_ref().expect("scenario must define run ID");
+    let command =
+        LifecycleCommand::Resume(orchestrator::RunId::parse(run_id).expect("run ID must be valid"));
+    let mut reporter = VecReporter::default();
+    let result = execute_lifecycle(
+        &command,
+        &environment(root),
+        TerminalMode::Unavailable,
+        &LifecycleSignals::default(),
+        &registry,
+        &mut reporter,
+    );
+    let calls = registry
+        .calls
+        .into_inner()
+        .expect("call log must be available");
+    (observe(result, reporter), calls)
+}
+
 fn run_start_with_terminal(
     world: &mut LifecycleWorld,
     behaviors: impl IntoIterator<Item = Behavior>,
@@ -1530,6 +2028,51 @@ fn run_directory(world: &LifecycleWorld) -> PathBuf {
         .join(world.run_id.as_ref().expect("scenario must define run ID"))
 }
 
+fn attempt_record_names(world: &LifecycleWorld) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(run_directory(world))
+        .expect("run directory must be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".attempt.yaml"))
+        .collect();
+    names.sort();
+    names
+}
+
+fn durable_snapshot(world: &LifecycleWorld) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<(String, Vec<u8>)> = fs::read_dir(run_directory(world))
+        .expect("run directory must be readable")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                fs::read(entry.path()).expect("durable file must be readable"),
+            )
+        })
+        .collect();
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
+}
+
+fn input_versions(call: &Call) -> Vec<String> {
+    call.inputs
+        .iter()
+        .map(|input| {
+            format!(
+                "{}:{}:{}",
+                input.step_id,
+                input.input_id,
+                input
+                    .path
+                    .file_name()
+                    .expect("artifact path must have a file name")
+                    .to_string_lossy()
+            )
+        })
+        .collect()
+}
+
 impl LifecycleWorld {
     fn observed(&self) -> &Observed {
         self.observed
@@ -1542,6 +2085,7 @@ impl LifecycleWorld {
 async fn main() {
     LifecycleWorld::run("features/lifecycle.feature").await;
     LifecycleWorld::run("features/graph_execution.feature").await;
+    LifecycleWorld::run("features/recovery.feature").await;
     LifecycleWorld::run("features/human_execution.feature").await;
     LifecycleWorld::run("features/signal_shutdown.feature").await;
 }

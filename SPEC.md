@@ -195,6 +195,8 @@ type из materialized workflow и полного содержимого Agent a
 - Workflow show выбирает ровно один source template, проверяет его структурную schema и symbolic IDs, сохраняет исходный порядок Steps и source references, но не читает config или prompts, не применяет defaults и не проверяет существование references либо graph reachability.
 - Agent show полностью проверяет config общей config boundary до выбора одного named Agent и не применяет `default-agent`.
 - Prompt show выбирает и полностью читает ровно один regular UTF-8 template, поэтому ошибки других prompt templates не влияют на результат.
+- Bulk workflow validation строит полный deterministic report по всем source workflow templates, продолжает после независимой validation error кандидата и не создаёт runs.
+- Workflow plan использует ту же полную materialization и graph validation boundary, что `start`, но возвращает typed кандидат до резервирования RunId, Run lock и durable publication.
 
 ## Codex Agent type
 

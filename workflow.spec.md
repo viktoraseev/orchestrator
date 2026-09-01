@@ -72,6 +72,10 @@ Step terminal, если ни один Step не содержит его ID в `d
 
 Preflight не записывает snapshot в run: `validate` завершает работу после проверки кандидата, а `start` durable-публикует его только после резервирования run по `format.spec.md`. Во время выполнения статическая reachability повторно не вычисляется.
 
+- `validate --all` применяет полный preflight независимо к каждому WorkflowId из детерминированного source catalog и сохраняет ошибки отдельных кандидатов в полном отчёте.
+- `workflow graph` проверяет source structure, dependency references и статическую reachability без разрешения Agent и Prompt references и представляет initial activation первого Step как bootstrap graph fact.
+- `workflow plan` возвращает полностью materialized кандидат с effective Agents, prompt content и parallel limit через ту же validation boundary, что `start`, но не резервирует и не публикует run.
+
 ## Fail-fast input validation
 
 При создании и восстановлении attempt input обязан содержать ровно один source attempt для каждого Step в порядке его `depends-on`. Каждый source attempt обязан существовать, быть успешно завершённым, иметь меньший номер и быть свежее нижней границы target Step. Для каждого InputId из его `outputs` обязан существовать соответствующий artifact.

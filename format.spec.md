@@ -123,6 +123,7 @@ steps:
 
 - Materialization добавляет `workflow-id` и эффективный `max-parallel-agents`, заменяет ссылки `agent` и `prompt` их значениями и сериализует кандидат как YAML без записи в run; другой обработки содержимого нет.
 - Materialized workflow не содержит AgentId, PromptId или ссылок на изменяемые config, workflow и prompt files.
+- JSON workflow plan представляет тот же materialized кандидат с snake_case полями `workflow_id`, `max_parallel_agents` и `steps`; каждый Step содержит Agent object `{type,model,reasoning}`, точный `prompt` либо `null`, `human`, `depends_on` и `outputs`, но этот object не является durable-файлом.
 - Durable-публикация `spec.yaml` выполняется атомарно после резервирования run и до публикации первого Agent attempt; после публикации файл неизменяем.
 
 ## Agent attempt record

@@ -18,8 +18,9 @@ use orchestrator::{
     TerminationSignal, ValidateCommand, execute_agent_list, execute_agent_show, execute_config,
     execute_lifecycle, execute_prompt_list, execute_prompt_show, execute_run_artifacts,
     execute_run_list_formatted, execute_run_show_formatted, execute_run_verify, execute_run_watch,
-    execute_validate, execute_workflow_list, execute_workflow_show, open_run_artifact,
-    send_attempt_completion, send_session_activation,
+    execute_validate, execute_validate_all, execute_workflow_graph, execute_workflow_list,
+    execute_workflow_plan, execute_workflow_show, open_run_artifact, send_attempt_completion,
+    send_session_activation,
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -39,6 +40,10 @@ enum TopLevelCommand {
     },
     Validate {
         workflow_id: Option<String>,
+        #[arg(long, conflicts_with = "workflow_id")]
+        all: bool,
+        #[arg(long, value_enum, requires = "all")]
+        format: Option<InspectionFormatArgument>,
     },
     Start {
         workflow_id: Option<String>,
@@ -52,7 +57,7 @@ enum TopLevelCommand {
     },
     Workflow {
         #[command(subcommand)]
-        command: CatalogCliCommand,
+        command: WorkflowCliCommand,
     },
     Agent {
         #[command(subcommand)]
@@ -69,6 +74,29 @@ enum TopLevelCommand {
     Attempt {
         #[command(subcommand)]
         command: AttemptCliCommand,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum WorkflowCliCommand {
+    List {
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
+    },
+    Show {
+        workflow_id: String,
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
+    },
+    Graph {
+        workflow_id: String,
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
+    },
+    Plan {
+        workflow_id: String,
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
     },
 }
 
@@ -389,15 +417,30 @@ fn dispatch(
         TopLevelCommand::Config { command } => {
             dispatch_config(command, environment).map(CommandOutput::Text)
         }
-        TopLevelCommand::Validate { workflow_id } => workflow_id
-            .map_or_else(
-                || execute_validate(&ValidateCommand::configured_default(), environment),
-                |workflow_id| {
-                    ValidateCommand::explicit(&workflow_id)
-                        .and_then(|command| execute_validate(&command, environment))
-                },
-            )
-            .map(CommandOutput::Text),
+        TopLevelCommand::Validate {
+            workflow_id,
+            all,
+            format,
+        } => {
+            if all {
+                let (output, report) = execute_validate_all(
+                    environment,
+                    format.unwrap_or(InspectionFormatArgument::Text).into(),
+                )?;
+                let code = if report.is_valid() { 0 } else { 3 };
+                Ok(CommandOutput::TextWithCode(output, code))
+            } else {
+                workflow_id
+                    .map_or_else(
+                        || execute_validate(&ValidateCommand::configured_default(), environment),
+                        |workflow_id| {
+                            ValidateCommand::explicit(&workflow_id)
+                                .and_then(|command| execute_validate(&command, environment))
+                        },
+                    )
+                    .map(CommandOutput::Text)
+            }
+        }
         TopLevelCommand::Start { workflow_id } => {
             let command = workflow_id.map_or_else(
                 || Ok(LifecycleCommand::start_configured_default()),
@@ -414,9 +457,7 @@ fn dispatch(
             Ok(CommandOutput::None)
         }
         TopLevelCommand::Run { command } => dispatch_run(command, environment),
-        TopLevelCommand::Workflow { command } => {
-            dispatch_catalog(CatalogKind::Workflow, command, environment)
-        }
+        TopLevelCommand::Workflow { command } => dispatch_workflow(command, environment),
         TopLevelCommand::Agent { command } => {
             dispatch_catalog(CatalogKind::Agent, command, environment)
         }
@@ -446,9 +487,36 @@ fn dispatch(
 
 #[derive(Clone, Copy)]
 enum CatalogKind {
-    Workflow,
     Agent,
     Prompt,
+}
+
+fn dispatch_workflow(
+    command: WorkflowCliCommand,
+    environment: &ProcessEnvironment,
+) -> Result<CommandOutput, CommandError> {
+    match command {
+        WorkflowCliCommand::List { format } => {
+            execute_workflow_list(environment, format.into()).map(CommandOutput::Text)
+        }
+        WorkflowCliCommand::Show {
+            workflow_id,
+            format,
+        } => {
+            execute_workflow_show(&workflow_id, environment, format.into()).map(CommandOutput::Text)
+        }
+        WorkflowCliCommand::Graph {
+            workflow_id,
+            format,
+        } => execute_workflow_graph(&workflow_id, environment, format.into())
+            .map(CommandOutput::Text),
+        WorkflowCliCommand::Plan {
+            workflow_id,
+            format,
+        } => {
+            execute_workflow_plan(&workflow_id, environment, format.into()).map(CommandOutput::Text)
+        }
+    }
 }
 
 fn dispatch_catalog(
@@ -458,14 +526,11 @@ fn dispatch_catalog(
 ) -> Result<CommandOutput, CommandError> {
     match command {
         CatalogCliCommand::List { format } => match kind {
-            CatalogKind::Workflow => execute_workflow_list(environment, format.into()),
             CatalogKind::Agent => execute_agent_list(environment, format.into()),
             CatalogKind::Prompt => execute_prompt_list(environment, format.into()),
         }
         .map(CommandOutput::Text),
         CatalogCliCommand::Show { source_id, format } => match kind {
-            CatalogKind::Workflow => execute_workflow_show(&source_id, environment, format.into())
-                .map(CommandOutput::Text),
             CatalogKind::Agent => {
                 execute_agent_show(&source_id, environment, format.into()).map(CommandOutput::Text)
             }

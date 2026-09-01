@@ -26,4 +26,10 @@ pub use run::{
     execute_run_watch, inspect_run, inspect_runs, open_run_artifact, send_attempt_completion,
     send_session_activation,
 };
-pub use workflow::{ValidateCommand, execute_validate, execute_validate_with_registry};
+pub use workflow::{
+    ValidateCommand, WorkflowGraph, WorkflowGraphEdge, WorkflowPlan, WorkflowPlanAgent,
+    WorkflowPlanStep, WorkflowValidation, WorkflowValidationReport, build_workflow_graph,
+    build_workflow_plan, build_workflow_plan_with_registry, execute_validate, execute_validate_all,
+    execute_validate_with_registry, execute_workflow_graph, execute_workflow_plan,
+    validate_all_workflows, validate_all_workflows_with_registry,
+};

@@ -14,11 +14,14 @@
 - `orchestrator run verify [<run-id>] [--format text|json]` формирует полный read-only validation report.
 - `orchestrator workflow list [--format text|json]` перечисляет source workflow templates.
 - `orchestrator workflow show <workflow-id> [--format text|json]` показывает структуру выбранного source workflow template.
+- `orchestrator workflow graph <workflow-id> [--format text|json]` показывает validated dependency graph выбранного source workflow.
+- `orchestrator workflow plan <workflow-id> [--format text|json]` показывает полностью materialized execution plan без создания run.
 - `orchestrator agent list [--format text|json]` перечисляет named Agents из validated config.
 - `orchestrator agent show <agent-id> [--format text|json]` показывает выбранного named Agent из validated config.
 - `orchestrator prompt list [--format text|json]` перечисляет source prompt templates.
 - `orchestrator prompt show <prompt-id> [--format text|json]` читает выбранный source prompt template.
 - `orchestrator validate [<workflow-id>]` проверяет workflow без создания или изменения run.
+- `orchestrator validate --all [--format text|json]` проверяет все source workflow templates и формирует полный отчёт.
 - `orchestrator config get <key>` читает одно значение конфигурации.
 - `orchestrator config set <key> <value>` атомарно изменяет одно значение.
 - `orchestrator config list` печатает все поддерживаемые значения конфигурации.
@@ -176,6 +179,8 @@ Config обязан соответствовать `format.spec.md`. Невал�
 - `agent list` полностью проверяет `config.yaml` и сортирует named Agents по AgentId; text печатает `agent <id>: type=<type> model=<model> reasoning=<reasoning>`, JSON — array объектов `{agent,type,model,reasoning}`; отсутствие config или пустой `agents` mapping успешно.
 - `prompt list` сортирует templates по PromptId; text печатает `prompt <id>: bytes=<n> path=<absolute-path>`, JSON — array объектов `{prompt,bytes,path}`; `bytes` является JSON number, отсутствие `prompt/` успешно.
 - `workflow show` text печатает header `workflow <id>: path=<absolute-path>`, затем Steps в source order строками `step <id>: agent=<id|-> prompt=<id|-> human=<true|false> depends-on=<id,...|-> outputs=<id,...|->`; JSON возвращает object `{workflow,path,steps}`, где Step содержит `{id,agent,prompt,human,depends_on,outputs}`, отсутствующие optional references равны `null`, а source references не разрешаются через config, prompts или graph.
+- `workflow graph` не читает config и prompts; text печатает `workflow <id>: path=<absolute-path>`, `bootstrap: <first-step-id>` и dependency edges `<dependency> -> <step>` в source order, JSON возвращает object `{workflow,path,bootstrap,nodes,edges}` с edge objects `{from,to}`.
+- `workflow plan` выполняет полный preflight выбранного WorkflowId; text печатает `workflow <id>: max-parallel-agents=<n>` и Steps строками `step <id>: type=<type> model=<model> reasoning=<reasoning> prompt-bytes=<n|-> human=<true|false> depends-on=<id,...|-> outputs=<id,...|->`, JSON schema задана `format.spec.md`.
 - `agent show` выполняет полную config validation и затем выбирает Agent; text печатает `agent <id>: type=<type> model=<model> reasoning=<reasoning>`, JSON возвращает object `{agent,type,model,reasoning}`.
 - `prompt show` text побайтово равен UTF-8 содержимому выбранного template без добавления newline, JSON возвращает object `{prompt,bytes,path,content}` с числовым `bytes` и точным `content`; команда не читает соседние templates.
 - Невалидный basename contract file для list, non-regular выбранный или перечисляемый template, non-UTF-8 прочитанный prompt, невалидный source workflow либо невалидный config завершается с `3` без partial stdout; неизвестный явно выбранный source ID даёт `4`, синтаксически невалидный ID или format отклоняется с `2` до чтения source; другие расширения и начинающиеся с `.` временные entries list-команд игнорируются.
@@ -183,6 +188,7 @@ Config обязан соответствовать `format.spec.md`. Невал�
 ## `validate`
 
 - `validate` принимает не более одного WorkflowId, разрешает его по общим правилам и выполняет те же проверки, что preflight команды `start`.
+- `validate --all` взаимоисключаем с WorkflowId, сортирует source templates по WorkflowId и возвращает text `workflow <id>: valid|invalid: <diagnostic>` либо JSON `{workflows:[{workflow,valid,diagnostics}]}`; пустой catalog успешен, все valid дают `0`, наличие invalid даёт `3` после полного stdout, а global I/O error прерывает команду с `1` без partial stdout.
 - Полный контракт workflow graph и validation определён в `workflow.spec.md`.
 - Ошибки выводятся в детерминированном порядке: сначала структура файла, затем steps в порядке workflow, затем ссылки и граф.
 - Невалидный workflow завершается с `3`.

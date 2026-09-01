@@ -4,13 +4,14 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use cucumber::{World, given, then, when};
 use orchestrator::{
-    AgentExit, AgentRegistry, AgentRunRequest, AttemptControl, LifecycleCommand, LifecycleReporter,
-    ProcessEnvironment, execute_lifecycle,
+    AgentExit, AgentInput, AgentRegistry, AgentRunRequest, AttemptControl, LifecycleCommand,
+    LifecycleReporter, ProcessEnvironment, execute_lifecycle,
 };
 use tempfile::TempDir;
 
@@ -24,6 +25,7 @@ struct LifecycleWorld {
     process_gate: Option<PathBuf>,
     process_ready: Option<PathBuf>,
     control_code: Option<PathBuf>,
+    max_concurrency: usize,
 }
 
 #[derive(Debug)]
@@ -35,8 +37,11 @@ struct Observed {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Call {
+    step_id: String,
     attempt: u64,
     resume_session: Option<String>,
+    inputs: Vec<AgentInput>,
+    prompt: String,
 }
 
 #[derive(Debug)]
@@ -47,6 +52,7 @@ enum Behavior {
     CompleteTwice,
     CompleteThenInvalid,
     CompleteWithExit(i32),
+    CompleteEmpty,
 }
 
 #[derive(Debug)]
@@ -83,7 +89,10 @@ impl AgentRegistry for FakeAgentRegistry {
         let run_directory = self.root.join("run").join(request.run_id);
         if !run_directory.join("spec.yaml").is_file()
             || !run_directory
-                .join(format!("{}.first.attempt.yaml", request.attempt))
+                .join(format!(
+                    "{}.{}.attempt.yaml",
+                    request.attempt, request.step_id
+                ))
                 .is_file()
         {
             return Err("Agent вызван до durable-публикации run".to_owned());
@@ -92,8 +101,11 @@ impl AgentRegistry for FakeAgentRegistry {
             .lock()
             .expect("call log must be available")
             .push(Call {
+                step_id: request.step_id.to_owned(),
                 attempt: request.attempt,
                 resume_session: request.resume_session.map(str::to_owned),
+                inputs: request.inputs.to_vec(),
+                prompt: request.prompt.to_owned(),
             });
         let behavior = self
             .behaviors
@@ -109,7 +121,9 @@ impl AgentRegistry for FakeAgentRegistry {
                 }
             }
             Behavior::Complete { input_id, bytes } => {
-                let source = self.root.join("source-artifact");
+                let source = self
+                    .root
+                    .join(format!("source-artifact-{}", request.attempt));
                 fs::write(&source, bytes).map_err(|error| error.to_string())?;
                 control.complete(&[(input_id, source)])?;
             }
@@ -134,6 +148,70 @@ impl AgentRegistry for FakeAgentRegistry {
                 control.complete(&[("result".to_owned(), source)])?;
                 return Ok(AgentExit { code });
             }
+            Behavior::CompleteEmpty => control.complete(&[])?,
+        }
+        Ok(AgentExit { code: 0 })
+    }
+}
+
+#[derive(Debug)]
+struct ParallelAgentRegistry {
+    calls: Mutex<Vec<Call>>,
+    branch_barrier: Barrier,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    fail_left: bool,
+}
+
+impl ParallelAgentRegistry {
+    fn new(fail_left: bool) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            branch_barrier: Barrier::new(2),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            fail_left,
+        }
+    }
+}
+
+impl AgentRegistry for ParallelAgentRegistry {
+    fn validate(&self, type_id: &str, model: &str, reasoning: &str) -> Result<(), String> {
+        if type_id == "codex" && !model.is_empty() && !reasoning.is_empty() {
+            Ok(())
+        } else {
+            Err("невалидный parallel fake Agent".to_owned())
+        }
+    }
+
+    fn run(
+        &self,
+        request: &AgentRunRequest<'_>,
+        control: &mut dyn AttemptControl,
+    ) -> Result<AgentExit, String> {
+        self.calls
+            .lock()
+            .expect("parallel call log must be available")
+            .push(Call {
+                step_id: request.step_id.to_owned(),
+                attempt: request.attempt,
+                resume_session: request.resume_session.map(str::to_owned),
+                inputs: request.inputs.to_vec(),
+                prompt: request.prompt.to_owned(),
+            });
+        if matches!(request.step_id, "left" | "right") {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            control.activate_session(request.step_id)?;
+            self.branch_barrier.wait();
+            if self.fail_left && request.step_id == "left" {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                return Ok(AgentExit { code: 7 });
+            }
+            control.complete(&[])?;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        } else {
+            control.complete(&[])?;
         }
         Ok(AgentExit { code: 0 })
     }
@@ -157,6 +235,63 @@ fn workflow_without_outputs(world: &mut LifecycleWorld) {
 #[given("подготовлен single-step workflow с output result")]
 fn workflow_with_output(world: &mut LifecycleWorld) {
     prepare_workflow(world, &["result"]);
+}
+
+#[given("подготовлен линейный workflow source → target")]
+fn linear_workflow(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: source\n    agent: main\n    prompt: null\n    human: false\n    depends-on: []\n    outputs: [result]\n  - id: target\n    agent: main\n    prompt: target\n    human: false\n    depends-on: [source]\n    outputs: []\n",
+        Some((
+            "target",
+            "at {{path:source:result}} says {{content:source:result}}",
+        )),
+    );
+}
+
+#[given("подготовлен diamond workflow")]
+fn diamond_workflow(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: root\n    agent: main\n    prompt: null\n    human: false\n    depends-on: []\n    outputs: []\n  - id: left\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [root]\n    outputs: []\n  - id: right\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [root]\n    outputs: []\n  - id: join\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [left, right]\n    outputs: []\n",
+        None,
+    );
+}
+
+#[given("подготовлен diamond workflow с общим лимитом 2")]
+fn parallel_diamond_workflow(world: &mut LifecycleWorld) {
+    diamond_workflow(world);
+    let root = world.root.as_ref().expect("scenario must define root");
+    fs::write(
+        root.path().join("config.yaml"),
+        "default-agent: main\nmax-parallel-agents: 2\nagents:\n  main:\n    type: codex\n    model: model\n    reasoning: high\n",
+    )
+    .expect("parallel config must be written");
+}
+
+#[given("process branch Agents настроены для fail-fast")]
+fn process_branches_for_fail_fast(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    for name in ["left.gate", "right.gate"] {
+        let status = Command::new("mkfifo")
+            .arg(root.path().join(name))
+            .status()
+            .expect("mkfifo must run");
+        assert!(status.success());
+    }
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\ncase \"$ORC_STEP_ID\" in\n  root|join) \"$ORC_TEST_ORCHESTRATOR\" attempt complete ;;\n  left) printf %s \"$ORC_CONTROL_ENDPOINT\" > \"$ORC_HOME/left.endpoint\"; : > \"$ORC_HOME/left.ready\"; IFS= read -r ignored < \"$ORC_HOME/left.gate\"; exit 7 ;;\n  right) trap ': > \"$ORC_HOME/right.terminated\"; exit 143' TERM; printf %s \"$ORC_CONTROL_ENDPOINT\" > \"$ORC_HOME/right.endpoint\"; : > \"$ORC_HOME/right.ready\"; IFS= read -r ignored < \"$ORC_HOME/right.gate\"; \"$ORC_TEST_ORCHESTRATOR\" attempt complete ;;\nesac\n",
+    );
+}
+
+#[given("подготовлен fan-in workflow с одинаковым output shared")]
+fn shared_output_workflow(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: root\n    agent: main\n    prompt: null\n    human: false\n    depends-on: []\n    outputs: [seed]\n  - id: left\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [root]\n    outputs: [shared]\n  - id: right\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [root]\n    outputs: [shared]\n  - id: join\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [left, right]\n    outputs: []\n",
+        None,
+    );
 }
 
 #[given("подготовлен корень без runs")]
@@ -324,6 +459,133 @@ fn completion_before_nonzero_exit(world: &mut LifecycleWorld) {
     run_start(world, [Behavior::CompleteWithExit(7)]);
 }
 
+#[when("source публикует result hello, а target завершается")]
+fn complete_linear_workflow(world: &mut LifecycleWorld) {
+    run_start(
+        world,
+        [
+            Behavior::Complete {
+                input_id: "result".to_owned(),
+                bytes: b"hello".to_vec(),
+            },
+            Behavior::CompleteEmpty,
+        ],
+    );
+}
+
+#[when("source публикует невалидный UTF-8 result")]
+fn invalid_utf8_source(world: &mut LifecycleWorld) {
+    run_start(
+        world,
+        [Behavior::Complete {
+            input_id: "result".to_owned(),
+            bytes: vec![0xff],
+        }],
+    );
+}
+
+#[when("все четыре Steps успешно завершаются")]
+fn complete_diamond(world: &mut LifecycleWorld) {
+    run_start(
+        world,
+        std::iter::repeat_with(|| Behavior::CompleteEmpty).take(4),
+    );
+}
+
+#[when("ветви выполняются через синхронизируемые fake Agents")]
+fn complete_parallel_diamond(world: &mut LifecycleWorld) {
+    run_parallel_diamond(world, false);
+}
+
+#[when("левая ветвь fail-fast завершается с ошибкой")]
+fn fail_parallel_diamond(world: &mut LifecycleWorld) {
+    run_parallel_diamond(world, true);
+}
+
+#[when("process fail-fast освобождает заблокированную соседнюю ветвь")]
+fn process_fail_fast_releases_sibling(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let agent = world
+        .process_agent
+        .as_ref()
+        .expect("scenario must define process Agent");
+    let child = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["start", "delivery"])
+        .env("ORC_HOME", root.path())
+        .env("ORC_AGENT_COMMAND", agent)
+        .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("orchestrator must start");
+    wait_for_path(&root.path().join("left.ready"));
+    wait_for_path(&root.path().join("right.ready"));
+    fs::write(root.path().join("left.gate"), b"fail\n").expect("left Agent must be released");
+    let output = child.wait_with_output().expect("orchestrator must exit");
+    let lines: Vec<String> = String::from_utf8(output.stdout)
+        .expect("stdout must be UTF-8")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    world.run_id = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("Run "))
+        .filter(|value| !value.ends_with(" exited"))
+        .map(str::to_owned);
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines,
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
+fn run_parallel_diamond(world: &mut LifecycleWorld, fail_left: bool) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let registry = ParallelAgentRegistry::new(fail_left);
+    let mut reporter = VecReporter::default();
+    let result = execute_lifecycle(
+        &LifecycleCommand::start_explicit("delivery").expect("workflow ID must be valid"),
+        &environment(root),
+        &registry,
+        &mut reporter,
+    );
+    world.run_id = reporter
+        .0
+        .iter()
+        .find_map(|line| line.strip_prefix("Run "))
+        .filter(|value| !value.ends_with(" exited"))
+        .map(str::to_owned);
+    world.calls = registry
+        .calls
+        .into_inner()
+        .expect("parallel call log must be available");
+    world.max_concurrency = registry.max_active.load(Ordering::SeqCst);
+    world.observed = Some(observe(result, reporter));
+}
+
+#[when("все четыре Steps публикуют свои outputs и завершаются")]
+fn complete_shared_outputs(world: &mut LifecycleWorld) {
+    run_start(
+        world,
+        [
+            Behavior::Complete {
+                input_id: "seed".to_owned(),
+                bytes: b"seed".to_vec(),
+            },
+            Behavior::Complete {
+                input_id: "shared".to_owned(),
+                bytes: b"left".to_vec(),
+            },
+            Behavior::Complete {
+                input_id: "shared".to_owned(),
+                bytes: b"right".to_vec(),
+            },
+            Behavior::CompleteEmpty,
+        ],
+    );
+}
+
 #[when(expr = "неизвестный run {word} продолжается через lifecycle API")]
 #[allow(clippy::needless_pass_by_value)]
 fn resume_unknown_run(world: &mut LifecycleWorld, run_id: String) {
@@ -473,8 +735,11 @@ fn durable_before_agent(world: &mut LifecycleWorld) {
     assert_eq!(
         world.calls,
         vec![Call {
+            step_id: "first".to_owned(),
             attempt: 0,
-            resume_session: None
+            resume_session: None,
+            inputs: Vec::new(),
+            prompt: String::new(),
         }],
         "{:?}",
         world.observed().error
@@ -509,8 +774,11 @@ fn resumed_same_attempt(world: &mut LifecycleWorld) {
     assert_eq!(
         world.calls,
         vec![Call {
+            step_id: "first".to_owned(),
             attempt: 0,
-            resume_session: Some("a".to_owned())
+            resume_session: Some("a".to_owned()),
+            inputs: Vec::new(),
+            prompt: String::new(),
         }],
         "{:?}",
         world.observed().error
@@ -570,6 +838,109 @@ fn child_completion_exit_code(world: &mut LifecycleWorld) {
     );
 }
 
+#[then("target attempt 1 имеет input 0")]
+fn target_input_is_source(world: &mut LifecycleWorld) {
+    let record = fs::read_to_string(run_directory(world).join("1.target.attempt.yaml"))
+        .expect("target attempt must be readable");
+    assert!(record.contains("input:\n- 0"));
+}
+
+#[then("target Agent получает artifact source:result и prompt с path и content hello")]
+fn target_receives_input_and_prompt(world: &mut LifecycleWorld) {
+    let call = world.calls.get(1).expect("target Agent must be called");
+    assert_eq!(call.step_id, "target");
+    assert_eq!(call.inputs.len(), 1);
+    assert_eq!(call.inputs[0].step_id, "source");
+    assert_eq!(call.inputs[0].input_id, "result");
+    assert!(
+        call.prompt
+            .contains(call.inputs[0].path.to_string_lossy().as_ref())
+    );
+    assert!(call.prompt.ends_with("says hello"));
+}
+
+#[then("target attempt 1 не создан")]
+fn target_attempt_absent(world: &mut LifecycleWorld) {
+    assert!(!run_directory(world).join("1.target.attempt.yaml").exists());
+}
+
+#[then("attempts созданы как 0 root, 1 left, 2 right, 3 join")]
+fn diamond_attempt_order(world: &mut LifecycleWorld) {
+    let directory = run_directory(world);
+    for name in [
+        "0.root.attempt.yaml",
+        "1.left.attempt.yaml",
+        "2.right.attempt.yaml",
+        "3.join.attempt.yaml",
+    ] {
+        assert!(directory.join(name).is_file(), "missing {name}");
+    }
+    let mut calls: Vec<(&str, u64)> = world
+        .calls
+        .iter()
+        .map(|call| (call.step_id.as_str(), call.attempt))
+        .collect();
+    calls.sort_by_key(|call| call.1);
+    assert_eq!(calls, [("root", 0), ("left", 1), ("right", 2), ("join", 3)]);
+}
+
+#[then("join attempt имеет input 1, 2")]
+fn join_input_versions(world: &mut LifecycleWorld) {
+    let record = fs::read_to_string(run_directory(world).join("3.join.attempt.yaml"))
+        .expect("join attempt must be readable");
+    assert!(record.contains("input:\n- 1\n- 2"));
+}
+
+#[then("join Agent получает inputs left:shared и right:shared")]
+fn join_receives_distinct_inputs(world: &mut LifecycleWorld) {
+    let call = world.calls.last().expect("join Agent must be called");
+    let keys: Vec<(&str, &str)> = call
+        .inputs
+        .iter()
+        .map(|input| (input.step_id.as_str(), input.input_id.as_str()))
+        .collect();
+    assert_eq!(keys, [("left", "shared"), ("right", "shared")]);
+}
+
+#[then("одновременно работали ровно 2 branch Agents")]
+fn exactly_two_parallel_agents(world: &mut LifecycleWorld) {
+    assert_eq!(world.max_concurrency, 2);
+}
+
+#[then("parallel attempts сохранили независимые session contexts")]
+fn parallel_sessions_are_independent(world: &mut LifecycleWorld) {
+    let directory = run_directory(world);
+    let left = fs::read_to_string(directory.join("1.left.attempt.yaml"))
+        .expect("left attempt must be readable");
+    let right = fs::read_to_string(directory.join("2.right.attempt.yaml"))
+        .expect("right attempt must be readable");
+    assert!(left.contains("session-id: left"));
+    assert!(!left.contains("session-id: right"));
+    assert!(right.contains("session-id: right"));
+    assert!(!right.contains("session-id: left"));
+}
+
+#[then("успешная правая ветвь durable завершена, а join не создан")]
+fn successful_sibling_is_durable_without_join(world: &mut LifecycleWorld) {
+    let directory = run_directory(world);
+    let right = fs::read_to_string(directory.join("2.right.attempt.yaml"))
+        .expect("right attempt must be readable");
+    assert!(right.trim_end().ends_with("type: completed"));
+    assert!(!directory.join("3.join.attempt.yaml").exists());
+}
+
+#[then("обе process ветви использовали один endpoint и правая получила SIGTERM")]
+fn process_branches_share_endpoint_and_cancel(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let left = fs::read_to_string(root.path().join("left.endpoint"))
+        .expect("left endpoint must be readable");
+    let right = fs::read_to_string(root.path().join("right.endpoint"))
+        .expect("right endpoint must be readable");
+    assert!(!left.is_empty());
+    assert_eq!(left, right);
+    assert!(root.path().join("right.terminated").is_file());
+}
+
 #[then("attempt завершён terminal event completed")]
 fn attempt_completed(world: &mut LifecycleWorld) {
     let text = fs::read_to_string(run_directory(world).join("0.first.attempt.yaml"))
@@ -622,6 +993,24 @@ fn prepare_workflow(world: &mut LifecycleWorld, outputs: &[&str]) {
         format!("steps:\n  - id: first\n    agent: main\n    prompt: null\n    human: false\n    depends-on: []\n    outputs: {outputs}\n"),
     )
     .expect("workflow must be written");
+    world.root = Some(root);
+}
+
+fn prepare_graph(world: &mut LifecycleWorld, workflow: &str, prompt: Option<(&str, &str)>) {
+    let root = TempDir::new().expect("test root must be created");
+    fs::create_dir_all(root.path().join("workflow")).expect("workflow root must be created");
+    fs::create_dir_all(root.path().join("prompt")).expect("prompt root must be created");
+    fs::write(
+        root.path().join("config.yaml"),
+        "default-agent: main\nagents:\n  main:\n    type: codex\n    model: model\n    reasoning: high\n",
+    )
+    .expect("config must be written");
+    fs::write(root.path().join("workflow/delivery.yaml"), workflow)
+        .expect("workflow must be written");
+    if let Some((id, content)) = prompt {
+        fs::write(root.path().join("prompt").join(format!("{id}.md")), content)
+            .expect("prompt must be written");
+    }
     world.root = Some(root);
 }
 
@@ -711,4 +1100,5 @@ impl LifecycleWorld {
 #[tokio::main]
 async fn main() {
     LifecycleWorld::run("features/lifecycle.feature").await;
+    LifecycleWorld::run("features/graph_execution.feature").await;
 }

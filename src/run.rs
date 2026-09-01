@@ -1,12 +1,13 @@
 //! Lifecycle run, storage и control boundary; модуль не разбирает CLI и не знает протокол конкретного Agent type.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{AgentRegistry, AgentRunRequest, AttemptControl};
+use crate::agent::{AgentCancellation, AgentInput, AgentRegistry, AgentRunRequest, AttemptControl};
 use crate::config::{CommandError, ProcessEnvironment, RawAgent, resolve_state_root};
 use crate::workflow::{ValidateCommand, Workflow, materialize_for_lifecycle};
 
@@ -266,19 +267,14 @@ fn start(
         "start",
     )?;
     report(reporter, &format!("Run {run_id}"), "start")?;
-    let result = run_current_attempt(&guard, run_id, &candidate, 0, registry, &record).and_then(
-        |completed| {
+    let result =
+        execute_scheduler(&guard, run_id, &candidate, registry, "start").and_then(|completed| {
             if completed {
-                report(reporter, &format!("run {run_id}: completed"), "start")?;
-                Ok(())
+                report(reporter, &format!("run {run_id}: completed"), "start")
             } else {
-                Err(CommandError::Runtime {
-                    context: format!("start: run {run_id}: Agent вернул управление без completion"),
-                    source: std::io::Error::other("attempt остался незавершённым"),
-                })
+                Err(blocked(run_id, "start", &[]))
             }
-        },
-    );
+        });
     let exit_result = report(reporter, &format!("Run {run_id} exited"), "start");
     result.and(exit_result)
 }
@@ -299,51 +295,57 @@ fn resume(
     let guard = RunGuard::acquire(directory, &format!("resume: run {run_id}"))?;
     let candidate: MaterializedWorkflow = read_yaml(&guard.directory.join("spec.yaml"), "resume")?;
     validate_materialized(&candidate, registry, run_id)?;
-    let first = candidate
-        .steps
-        .first()
-        .ok_or_else(|| invalid_run(run_id, "spec не содержит Steps"))?;
-    let record: AttemptRecord =
-        read_yaml(&guard.directory.join(attempt_name(0, &first.id)), "resume")?;
-    validate_record(&record, first, 0, &guard.directory, run_id)?;
-    let result = if record.is_completed() {
+    let attempts = load_attempts(&guard.directory, &candidate, registry, run_id)?;
+    let result = if is_completed(&candidate, &attempts)? {
         report(
             reporter,
             &format!("run {run_id}: already completed"),
             "resume",
         )
     } else {
-        run_current_attempt(&guard, run_id, &candidate, 0, registry, &record).and_then(
-            |completed| {
-                if completed {
-                    report(reporter, &format!("run {run_id}: completed"), "resume")
-                } else {
-                    Err(CommandError::Runtime {
-                        context: format!(
-                            "resume: run {run_id}: Agent вернул управление без completion"
-                        ),
-                        source: std::io::Error::other("attempt остался незавершённым"),
-                    })
-                }
-            },
-        )
+        execute_scheduler(&guard, run_id, &candidate, registry, "resume").and_then(|completed| {
+            if completed {
+                report(reporter, &format!("run {run_id}: completed"), "resume")
+            } else {
+                Err(blocked(run_id, "resume", &[]))
+            }
+        })
     };
     let exit_result = report(reporter, &format!("Run {run_id} exited"), "resume");
     result.and(exit_result)
 }
 
-fn run_current_attempt(
-    guard: &RunGuard,
+#[derive(Clone, Copy)]
+struct AttemptExecution<'a> {
+    guard: &'a RunGuard,
     run_id: RunId,
-    workflow: &MaterializedWorkflow,
-    attempt: u64,
-    registry: &dyn AgentRegistry,
-    record: &AttemptRecord,
+    workflow: &'a MaterializedWorkflow,
+    registry: &'a dyn AgentRegistry,
+    hub: &'a Arc<ControlHub>,
+    endpoint: &'a Path,
+    cancellation: &'a AgentCancellation,
+}
+
+fn run_current_attempt(
+    execution: &AttemptExecution<'_>,
+    attempt: &DurableAttempt,
 ) -> Result<bool, CommandError> {
-    let step = workflow
-        .steps
-        .first()
-        .ok_or_else(|| invalid_run(run_id, "spec не содержит Steps"))?;
+    let AttemptExecution {
+        guard,
+        run_id,
+        workflow,
+        registry,
+        hub,
+        endpoint,
+        cancellation,
+    } = execution;
+    let run_id = *run_id;
+    let step = workflow.steps.get(attempt.step_index).ok_or_else(|| {
+        invalid_run(
+            run_id,
+            "attempt ссылается на отсутствующий materialized Step",
+        )
+    })?;
     if step.human {
         return Err(CommandError::Runtime {
             context: format!("run {run_id}: human attempt нельзя запустить без TTY"),
@@ -353,55 +355,53 @@ fn run_current_attempt(
     let state = Arc::new(Mutex::new(ControlState {
         active: true,
         run_id,
-        attempt,
+        attempt: attempt.number,
         run_directory: guard.directory.clone(),
         step_id: step.id.clone(),
         outputs: step.outputs.clone(),
-        record: record.clone(),
+        record: attempt.record.clone(),
         candidate: None,
+        storage: Arc::clone(&hub.storage),
     }));
-    let server = registry
-        .uses_process_control()
-        .then(|| ControlServer::start(&guard.directory, run_id, Arc::clone(&state)))
-        .transpose()?;
-    let endpoint = server
-        .as_ref()
-        .map_or_else(PathBuf::new, |server| server.path.clone());
+    register_context(hub, attempt.number, Arc::clone(&state))?;
     let mut control = ControlHandle {
         state: Arc::clone(&state),
     };
-    let prompt = step.prompt.as_deref().unwrap_or("");
+    let (inputs, prompt) = prepare_agent_input(&guard.directory, workflow, attempt, run_id)?;
+    let run_id_text = run_id.to_string();
     let result = registry.run(
         &AgentRunRequest {
+            step_id: &step.id,
             type_id: &step.agent.r#type,
             model: &step.agent.model,
             reasoning: &step.agent.reasoning,
-            prompt,
-            resume_session: record.last_session(),
-            run_id: &run_id.to_string(),
-            attempt,
-            control_endpoint: &endpoint,
+            prompt: &prompt,
+            inputs: &inputs,
+            resume_session: attempt.record.last_session(),
+            run_id: &run_id_text,
+            attempt: attempt.number,
+            control_endpoint: endpoint,
+            cancellation,
         },
         &mut control,
     );
-    if let Some(server) = server {
-        server.stop()?;
-    }
-    let exit = result.map_err(|context| CommandError::Runtime {
-        context: format!("run {run_id}: {context}"),
-        source: std::io::Error::other("Agent adapter failure"),
-    })?;
     let candidate = {
         let mut state = lock_state(&state)?;
         state.active = false;
         state.candidate.take()
     };
+    unregister_context(hub, attempt.number)?;
     let completed = if let Some(candidate) = candidate {
-        finalize_completion(&guard.directory, attempt, step, candidate)?;
+        let _storage = lock_storage(&hub.storage)?;
+        finalize_completion(&guard.directory, attempt.number, step, candidate)?;
         true
     } else {
         false
     };
+    let exit = result.map_err(|context| CommandError::Runtime {
+        context: format!("run {run_id}: {context}"),
+        source: std::io::Error::other("Agent adapter failure"),
+    })?;
     if exit.code != 0 {
         return Err(CommandError::Runtime {
             context: format!("run {run_id}: Agent завершился с кодом {}", exit.code),
@@ -409,6 +409,249 @@ fn run_current_attempt(
         });
     }
     Ok(completed)
+}
+
+#[derive(Clone, Debug)]
+struct DurableAttempt {
+    number: u64,
+    step_index: usize,
+    record: AttemptRecord,
+}
+
+fn execute_scheduler(
+    guard: &RunGuard,
+    run_id: RunId,
+    workflow: &MaterializedWorkflow,
+    registry: &dyn AgentRegistry,
+    context: &str,
+) -> Result<bool, CommandError> {
+    let hub = Arc::new(ControlHub {
+        run_id,
+        contexts: Mutex::new(HashMap::new()),
+        storage: Arc::new(Mutex::new(())),
+    });
+    let server = registry
+        .uses_process_control()
+        .then(|| ControlServer::start(&guard.directory, Arc::clone(&hub)))
+        .transpose()?;
+    let endpoint = server
+        .as_ref()
+        .map_or_else(PathBuf::new, |server| server.path.clone());
+    let result =
+        execute_scheduler_inner(guard, run_id, workflow, registry, context, &hub, &endpoint);
+    let stop_result = server.map(ControlServer::stop).transpose();
+    match (result, stop_result) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(completed), Ok(_)) => Ok(completed),
+    }
+}
+
+fn execute_scheduler_inner(
+    guard: &RunGuard,
+    run_id: RunId,
+    workflow: &MaterializedWorkflow,
+    registry: &dyn AgentRegistry,
+    context: &str,
+    hub: &Arc<ControlHub>,
+    endpoint: &Path,
+) -> Result<bool, CommandError> {
+    let mut launched = HashSet::new();
+    let cancellation = AgentCancellation::default();
+    let execution = AttemptExecution {
+        guard,
+        run_id,
+        workflow,
+        registry,
+        hub,
+        endpoint,
+        cancellation: &cancellation,
+    };
+    loop {
+        let attempts = load_attempts(&guard.directory, workflow, registry, run_id)?;
+        let mut runnable: Vec<&DurableAttempt> = attempts
+            .iter()
+            .filter(|attempt| !attempt.record.is_completed() && !launched.contains(&attempt.number))
+            .collect();
+        runnable.sort_by_key(|attempt| (attempt.step_index, attempt.number));
+        runnable.truncate(workflow.max_parallel_agents);
+        if !runnable.is_empty() {
+            launched.extend(runnable.iter().map(|attempt| attempt.number));
+            let worker_count = runnable.len();
+            let first_error = thread::scope(|scope| {
+                let (sender, receiver) = mpsc::channel();
+                for attempt in runnable {
+                    let sender = sender.clone();
+                    scope.spawn(move || {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            run_current_attempt(&execution, attempt)
+                        }))
+                        .unwrap_or_else(|_| {
+                            Err(CommandError::Runtime {
+                                context: format!("{context}: run {run_id}: Agent worker panic"),
+                                source: std::io::Error::other("Agent worker panic"),
+                            })
+                        });
+                        let _ = sender.send(result);
+                    });
+                }
+                drop(sender);
+                let mut first_error = None;
+                for _ in 0..worker_count {
+                    let result = receiver.recv().map_err(|source| CommandError::Runtime {
+                        context: format!("{context}: run {run_id}: Agent worker потерян"),
+                        source: std::io::Error::other(source),
+                    })?;
+                    let error = match result {
+                        Ok(true) => None,
+                        Ok(false) => Some(CommandError::Runtime {
+                            context: format!(
+                                "{context}: run {run_id}: Agent вернул управление без completion"
+                            ),
+                            source: std::io::Error::other("attempt остался незавершённым"),
+                        }),
+                        Err(error) => Some(error),
+                    };
+                    if let Some(error) = error {
+                        cancellation.cancel();
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+                Ok::<_, CommandError>(first_error)
+            })?;
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            continue;
+        }
+
+        let frontier = compute_frontier(workflow, &attempts)?;
+        if !frontier.ready.is_empty() {
+            let _storage = lock_storage(&hub.storage)?;
+            publish_ready_attempts(guard, run_id, workflow, &attempts, &frontier.ready, context)?;
+            continue;
+        }
+        if !frontier.missing.is_empty() {
+            return Err(blocked(run_id, context, &frontier.missing));
+        }
+        return Ok(attempts.iter().all(|attempt| attempt.record.is_completed()));
+    }
+}
+
+struct Frontier {
+    ready: Vec<usize>,
+    missing: Vec<String>,
+}
+
+fn compute_frontier(
+    workflow: &MaterializedWorkflow,
+    attempts: &[DurableAttempt],
+) -> Result<Frontier, CommandError> {
+    let mut ready = Vec::new();
+    let mut missing = Vec::new();
+    let mut missing_seen = HashSet::new();
+    for (step_index, step) in workflow.steps.iter().enumerate() {
+        if attempts
+            .iter()
+            .any(|attempt| attempt.step_index == step_index && !attempt.record.is_completed())
+        {
+            continue;
+        }
+        let previous = attempts
+            .iter()
+            .filter(|attempt| attempt.step_index == step_index)
+            .max_by_key(|attempt| attempt.number);
+        if step.depends_on.is_empty() {
+            continue;
+        }
+        let mut fresh = Vec::with_capacity(step.depends_on.len());
+        for (dependency_index, dependency) in step.depends_on.iter().enumerate() {
+            let source_index = workflow
+                .steps
+                .iter()
+                .position(|candidate| candidate.id == *dependency)
+                .ok_or_else(|| CommandError::Invalid {
+                    context: format!("workflow: неизвестный dependency '{dependency}'"),
+                })?;
+            let latest = attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.step_index == source_index && attempt.record.is_completed()
+                })
+                .map(|attempt| attempt.number)
+                .max();
+            let lower_bound =
+                previous.and_then(|attempt| attempt.record.input.get(dependency_index).copied());
+            fresh.push(latest.is_some_and(|number| lower_bound.is_none_or(|bound| number > bound)));
+        }
+        if fresh.iter().all(|value| *value) {
+            ready.push(step_index);
+        } else if fresh.iter().any(|value| *value) {
+            for (dependency, is_fresh) in step.depends_on.iter().zip(fresh) {
+                if !is_fresh && missing_seen.insert(dependency.clone()) {
+                    missing.push(dependency.clone());
+                }
+            }
+        }
+    }
+    Ok(Frontier { ready, missing })
+}
+
+fn publish_ready_attempts(
+    guard: &RunGuard,
+    run_id: RunId,
+    workflow: &MaterializedWorkflow,
+    attempts: &[DurableAttempt],
+    ready: &[usize],
+    context: &str,
+) -> Result<(), CommandError> {
+    let mut next = attempts
+        .iter()
+        .map(|attempt| attempt.number)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| invalid_run(run_id, "attempt number overflow"))?;
+    for &step_index in ready {
+        let step = &workflow.steps[step_index];
+        let mut input = Vec::with_capacity(step.depends_on.len());
+        for dependency in &step.depends_on {
+            let source_index = workflow
+                .steps
+                .iter()
+                .position(|candidate| candidate.id == *dependency)
+                .ok_or_else(|| invalid_run(run_id, "unknown dependency"))?;
+            let source = attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.step_index == source_index && attempt.record.is_completed()
+                })
+                .max_by_key(|attempt| attempt.number)
+                .ok_or_else(|| invalid_run(run_id, "ready Step не имеет completed dependency"))?;
+            input.push(source.number);
+        }
+        let record = AttemptRecord {
+            input,
+            events: Vec::new(),
+        };
+        let candidate = DurableAttempt {
+            number: next,
+            step_index,
+            record: record.clone(),
+        };
+        prepare_agent_input(&guard.directory, workflow, &candidate, run_id)?;
+        publish_yaml(
+            &guard.directory,
+            &attempt_name(next, &step.id),
+            &record,
+            context,
+        )?;
+        next = next
+            .checked_add(1)
+            .ok_or_else(|| invalid_run(run_id, "attempt number overflow"))?;
+    }
+    Ok(())
 }
 
 fn reserve_run(root: &Path) -> Result<(RunId, RunGuard), CommandError> {
@@ -478,6 +721,15 @@ struct ControlState {
     outputs: Vec<String>,
     record: AttemptRecord,
     candidate: Option<CompletionCandidate>,
+    storage: Arc<Mutex<()>>,
+}
+
+type ActiveContexts = HashMap<u64, Arc<Mutex<ControlState>>>;
+
+struct ControlHub {
+    run_id: RunId,
+    contexts: Mutex<ActiveContexts>,
+    storage: Arc<Mutex<()>>,
 }
 
 struct ControlHandle {
@@ -506,6 +758,7 @@ fn activate_session(
     state.record.events.push(AttemptEvent::SessionActivated {
         session_id: session_id.to_owned(),
     });
+    let _storage = lock_storage(&state.storage)?;
     publish_yaml(
         &state.run_directory,
         &attempt_name(state.attempt, &state.step_id),
@@ -621,11 +874,7 @@ struct ControlServer {
 }
 
 impl ControlServer {
-    fn start(
-        _directory: &Path,
-        run_id: RunId,
-        state: Arc<Mutex<ControlState>>,
-    ) -> Result<Self, CommandError> {
+    fn start(_directory: &Path, hub: Arc<ControlHub>) -> Result<Self, CommandError> {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let socket_root = if Path::new("/private/tmp").is_dir() {
             Path::new("/private/tmp")
@@ -650,7 +899,7 @@ impl ControlServer {
                 source,
             )
         })?;
-        let thread = thread::spawn(move || serve_control(listener, run_id, state));
+        let thread = thread::spawn(move || serve_control(listener, hub));
         Ok(Self { path, thread })
     }
 
@@ -689,11 +938,7 @@ impl ControlServer {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn serve_control(
-    listener: UnixListener,
-    run_id: RunId,
-    state: Arc<Mutex<ControlState>>,
-) -> Result<(), CommandError> {
+fn serve_control(listener: UnixListener, hub: Arc<ControlHub>) -> Result<(), CommandError> {
     for incoming in listener.incoming() {
         let mut stream = incoming
             .map_err(|source| runtime("control", "не удалось принять запрос".to_owned(), source))?;
@@ -703,7 +948,7 @@ fn serve_control(
         if matches!(request, ControlRequest::Shutdown) {
             return Ok(());
         }
-        let result = handle_request(&state, run_id, request);
+        let result = handle_request(&hub, request);
         let response = match result {
             Ok(()) => ControlResponse {
                 code: 0,
@@ -720,49 +965,55 @@ fn serve_control(
     Ok(())
 }
 
-fn handle_request(
-    state: &Arc<Mutex<ControlState>>,
-    served_run: RunId,
-    request: ControlRequest,
-) -> Result<(), CommandError> {
+fn handle_request(hub: &ControlHub, request: ControlRequest) -> Result<(), CommandError> {
     match request {
         ControlRequest::SessionActivate {
             run_id,
             attempt,
             session_id,
         } => {
-            validate_context(state, served_run, run_id, attempt)?;
-            activate_session(state, &session_id)
+            let state = context_for_request(hub, run_id, attempt)?;
+            activate_session(&state, &session_id)
         }
         ControlRequest::AttemptComplete {
             run_id,
             attempt,
             artifacts,
         } => {
-            validate_context(state, served_run, run_id, attempt)?;
-            accept_completion(state, &artifacts)
+            let state = context_for_request(hub, run_id, attempt)?;
+            accept_completion(&state, &artifacts)
         }
         ControlRequest::Shutdown => Ok(()),
     }
 }
 
-fn validate_context(
-    state: &Arc<Mutex<ControlState>>,
-    served_run: RunId,
+fn context_for_request(
+    hub: &ControlHub,
     run_id: u64,
     attempt: u64,
-) -> Result<(), CommandError> {
-    let state = lock_state(state)?;
-    if served_run.0 != run_id
-        || state.run_id.0 != run_id
-        || state.attempt != attempt
-        || !state.active
-    {
+) -> Result<Arc<Mutex<ControlState>>, CommandError> {
+    if hub.run_id.0 != run_id {
         return Err(CommandError::Busy {
             context: "control: context текущей обработки attempt закрыт".to_owned(),
         });
     }
-    Ok(())
+    let contexts = lock_contexts(&hub.contexts)?;
+    let state = contexts
+        .get(&attempt)
+        .cloned()
+        .ok_or_else(|| CommandError::Busy {
+            context: "control: context текущей обработки attempt закрыт".to_owned(),
+        })?;
+    drop(contexts);
+    {
+        let context = lock_state(&state)?;
+        if context.run_id.0 != run_id || context.attempt != attempt || !context.active {
+            return Err(CommandError::Busy {
+                context: "control: context текущей обработки attempt закрыт".to_owned(),
+            });
+        }
+    }
+    Ok(state)
 }
 
 /// Отправляет `session activate` parent supervisor из доверенного process context.
@@ -910,6 +1161,257 @@ fn validate_materialized(
     Ok(())
 }
 
+fn load_attempts(
+    directory: &Path,
+    workflow: &MaterializedWorkflow,
+    registry: &dyn AgentRegistry,
+    run_id: RunId,
+) -> Result<Vec<DurableAttempt>, CommandError> {
+    validate_materialized(workflow, registry, run_id)?;
+    let mut attempts = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|source| {
+        runtime(
+            "resume",
+            format!("не удалось прочитать {}", directory.display()),
+            source,
+        )
+    })? {
+        let entry = entry
+            .map_err(|source| runtime("resume", "не удалось прочитать durable entry", source))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || !name.ends_with(".attempt.yaml") {
+            continue;
+        }
+        let stem = name
+            .strip_suffix(".attempt.yaml")
+            .ok_or_else(|| invalid_run(run_id, "невалидное имя attempt record"))?;
+        let (number, step_id) = stem
+            .split_once('.')
+            .ok_or_else(|| invalid_run(run_id, "невалидное имя attempt record"))?;
+        let number = number
+            .parse::<u64>()
+            .map_err(|_| invalid_run(run_id, "невалидный номер attempt"))?;
+        let step_index = workflow
+            .steps
+            .iter()
+            .position(|step| step.id == step_id)
+            .ok_or_else(|| invalid_run(run_id, "attempt ссылается на неизвестный Step"))?;
+        let record: AttemptRecord = read_yaml(&entry.path(), "resume")?;
+        attempts.push(DurableAttempt {
+            number,
+            step_index,
+            record,
+        });
+    }
+    attempts.sort_by_key(|attempt| attempt.number);
+    if attempts.is_empty()
+        || attempts[0].number != 0
+        || attempts[0].step_index != 0
+        || !attempts[0].record.input.is_empty()
+    {
+        return Err(invalid_run(
+            run_id,
+            "initial attempt 0 отсутствует или противоречив",
+        ));
+    }
+    for pair in attempts.windows(2) {
+        if pair[0].number == pair[1].number {
+            return Err(invalid_run(run_id, "глобальный attempt number повторяется"));
+        }
+    }
+    for step_index in 0..workflow.steps.len() {
+        if attempts
+            .iter()
+            .filter(|attempt| attempt.step_index == step_index && !attempt.record.is_completed())
+            .count()
+            > 1
+        {
+            return Err(invalid_run(
+                run_id,
+                "Step имеет несколько незавершённых attempts",
+            ));
+        }
+    }
+    for attempt in &attempts {
+        let step = &workflow.steps[attempt.step_index];
+        validate_record(&attempt.record, step, attempt.number, directory, run_id)?;
+        validate_attempt_input(workflow, &attempts, attempt, run_id)?;
+    }
+    Ok(attempts)
+}
+
+fn validate_attempt_input(
+    workflow: &MaterializedWorkflow,
+    attempts: &[DurableAttempt],
+    attempt: &DurableAttempt,
+    run_id: RunId,
+) -> Result<(), CommandError> {
+    if attempt.number == 0 {
+        return Ok(());
+    }
+    let step = &workflow.steps[attempt.step_index];
+    if attempt.record.input.len() != step.depends_on.len() {
+        return Err(invalid_run(
+            run_id,
+            "attempt input не совпадает с depends-on",
+        ));
+    }
+    let previous = attempts
+        .iter()
+        .filter(|candidate| {
+            candidate.step_index == attempt.step_index && candidate.number < attempt.number
+        })
+        .max_by_key(|candidate| candidate.number);
+    for (dependency_index, (dependency, source_number)) in step
+        .depends_on
+        .iter()
+        .zip(&attempt.record.input)
+        .enumerate()
+    {
+        let source_index = workflow
+            .steps
+            .iter()
+            .position(|candidate| candidate.id == *dependency)
+            .ok_or_else(|| invalid_run(run_id, "unknown dependency"))?;
+        let source = attempts
+            .iter()
+            .find(|candidate| candidate.number == *source_number)
+            .ok_or_else(|| {
+                invalid_run(run_id, "attempt input ссылается на отсутствующий source")
+            })?;
+        if source.step_index != source_index
+            || !source.record.is_completed()
+            || source.number >= attempt.number
+        {
+            return Err(invalid_run(
+                run_id,
+                "attempt input ссылается на неготовый source",
+            ));
+        }
+        let latest = attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.step_index == source_index
+                    && candidate.record.is_completed()
+                    && candidate.number < attempt.number
+            })
+            .map(|candidate| candidate.number)
+            .max();
+        if latest != Some(*source_number) {
+            return Err(invalid_run(
+                run_id,
+                "attempt input выбрал не последнюю source version",
+            ));
+        }
+        if previous
+            .and_then(|candidate| candidate.record.input.get(dependency_index))
+            .is_some_and(|bound| source_number <= bound)
+        {
+            return Err(invalid_run(
+                run_id,
+                "attempt input повторно использует старую source version",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn prepare_agent_input(
+    directory: &Path,
+    workflow: &MaterializedWorkflow,
+    attempt: &DurableAttempt,
+    run_id: RunId,
+) -> Result<(Vec<AgentInput>, String), CommandError> {
+    let step = &workflow.steps[attempt.step_index];
+    let mut inputs = Vec::new();
+    for (dependency, source_number) in step.depends_on.iter().zip(&attempt.record.input) {
+        let source = workflow
+            .steps
+            .iter()
+            .find(|candidate| candidate.id == *dependency)
+            .ok_or_else(|| invalid_run(run_id, "unknown dependency"))?;
+        inputs.reserve(source.outputs.len());
+        for input_id in &source.outputs {
+            inputs.push(AgentInput {
+                step_id: dependency.clone(),
+                input_id: input_id.clone(),
+                path: directory.join(format!("{source_number}.{dependency}.{input_id}.artifact")),
+            });
+        }
+    }
+    let prompt = render_prompt(step.prompt.as_deref().unwrap_or(""), &inputs, run_id)?;
+    Ok((inputs, prompt))
+}
+
+fn render_prompt(
+    template: &str,
+    inputs: &[AgentInput],
+    run_id: RunId,
+) -> Result<String, CommandError> {
+    let mut output = String::with_capacity(template.len());
+    let mut remaining = template;
+    while let Some(start) = remaining.find("{{") {
+        output.push_str(&remaining[..start]);
+        let body_start = start.saturating_add(2);
+        let after_start = &remaining[body_start..];
+        let end = after_start
+            .find("}}")
+            .ok_or_else(|| invalid_run(run_id, "незакрытый materialized placeholder"))?;
+        let body = &after_start[..end];
+        let mut parts = body.split(':');
+        let kind = parts.next().unwrap_or_default();
+        let step_id = parts.next().unwrap_or_default();
+        let input_id = parts.next().unwrap_or_default();
+        if parts.next().is_some() {
+            return Err(invalid_run(run_id, "невалидный materialized placeholder"));
+        }
+        let input = inputs
+            .iter()
+            .find(|input| input.step_id == step_id && input.input_id == input_id)
+            .ok_or_else(|| invalid_run(run_id, "placeholder отсутствует в input mapping"))?;
+        match kind {
+            "path" => {
+                output.push_str(input.path.to_str().ok_or_else(|| {
+                    invalid_run(run_id, "durable artifact path не является UTF-8")
+                })?);
+            }
+            "content" => {
+                let content = fs::read_to_string(&input.path).map_err(|source| {
+                    if source.kind() == std::io::ErrorKind::InvalidData {
+                        invalid_run(run_id, "artifact для content не является UTF-8")
+                    } else {
+                        runtime(
+                            "run",
+                            format!("не удалось прочитать {}", input.path.display()),
+                            source,
+                        )
+                    }
+                })?;
+                output.push_str(&content);
+            }
+            _ => return Err(invalid_run(run_id, "неизвестный materialized placeholder")),
+        }
+        remaining = &after_start[end.saturating_add(2)..];
+    }
+    output.push_str(remaining);
+    Ok(output)
+}
+
+fn is_completed(
+    workflow: &MaterializedWorkflow,
+    attempts: &[DurableAttempt],
+) -> Result<bool, CommandError> {
+    if attempts
+        .iter()
+        .any(|attempt| !attempt.record.is_completed())
+    {
+        return Ok(false);
+    }
+    let frontier = compute_frontier(workflow, attempts)?;
+    Ok(frontier.ready.is_empty() && frontier.missing.is_empty())
+}
+
 fn validate_record(
     record: &AttemptRecord,
     step: &MaterializedStep,
@@ -917,12 +1419,6 @@ fn validate_record(
     directory: &Path,
     run_id: RunId,
 ) -> Result<(), CommandError> {
-    if !record.input.is_empty() {
-        return Err(invalid_run(
-            run_id,
-            "initial attempt input должен быть пустым",
-        ));
-    }
     let mut last_session = None;
     for (index, event) in record.events.iter().enumerate() {
         match event {
@@ -1006,6 +1502,44 @@ fn lock_state(
         context: "run: control state повреждён после panic".to_owned(),
         source: std::io::Error::other("poisoned control state"),
     })
+}
+
+fn lock_storage(storage: &Arc<Mutex<()>>) -> Result<std::sync::MutexGuard<'_, ()>, CommandError> {
+    storage.lock().map_err(|_| CommandError::Runtime {
+        context: "run: storage boundary повреждён после panic".to_owned(),
+        source: std::io::Error::other("poisoned storage boundary"),
+    })
+}
+
+fn lock_contexts(
+    contexts: &Mutex<ActiveContexts>,
+) -> Result<std::sync::MutexGuard<'_, ActiveContexts>, CommandError> {
+    contexts.lock().map_err(|_| CommandError::Runtime {
+        context: "run: control contexts повреждены после panic".to_owned(),
+        source: std::io::Error::other("poisoned control contexts"),
+    })
+}
+
+fn register_context(
+    hub: &ControlHub,
+    attempt: u64,
+    state: Arc<Mutex<ControlState>>,
+) -> Result<(), CommandError> {
+    if lock_contexts(&hub.contexts)?
+        .insert(attempt, state)
+        .is_some()
+    {
+        return Err(CommandError::Runtime {
+            context: format!("run {}: attempt {attempt} уже выполняется", hub.run_id),
+            source: std::io::Error::other("duplicate active attempt context"),
+        });
+    }
+    Ok(())
+}
+
+fn unregister_context(hub: &ControlHub, attempt: u64) -> Result<(), CommandError> {
+    lock_contexts(&hub.contexts)?.remove(&attempt);
+    Ok(())
 }
 
 fn attempt_name(attempt: u64, step_id: &str) -> String {
@@ -1096,6 +1630,18 @@ fn invalid_run(run_id: RunId, message: &str) -> CommandError {
     }
 }
 
+fn blocked(run_id: RunId, context: &str, missing: &[String]) -> CommandError {
+    let suffix = if missing.is_empty() {
+        String::new()
+    } else {
+        format!(": отсутствуют source Steps {}", missing.join(", "))
+    };
+    CommandError::Runtime {
+        context: format!("{context}: run {run_id}: blocked{suffix}"),
+        source: std::io::Error::other("workflow frontier blocked"),
+    }
+}
+
 fn runtime(context: &str, message: impl std::fmt::Display, source: std::io::Error) -> CommandError {
     CommandError::Runtime {
         context: format!("{context}: {message}"),
@@ -1139,6 +1685,7 @@ mod tests {
                 events: Vec::new(),
             },
             candidate: None,
+            storage: Arc::new(Mutex::new(())),
         }));
         accept_completion(&state, &[("result".to_owned(), good)])
             .expect("candidate must be accepted");

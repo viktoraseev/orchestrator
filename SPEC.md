@@ -175,6 +175,22 @@ completion и временный файл атомарной записи не �
 type из materialized workflow и полного содержимого Agent attempt record;
 отдельный сохранённый status не используется.
 
+## Codex Agent type
+
+- Type `codex` принимает непустой `model` и `reasoning` из множества `low`, `medium`, `high`, `xhigh`, `max`; executable по умолчанию — `codex`.
+- Новая non-human session запускается как `codex exec --json --model <model> --config model_reasoning_effort="<reasoning>" <prompt>`, а native resume — как `codex exec resume --json --model <model> --config model_reasoning_effort="<reasoning>" <session-id> <prompt>`.
+- Новая human session запускается как `codex --model <model> --config model_reasoning_effort="<reasoning>" <prompt>`, а native resume — как `codex resume --model <model> --config model_reasoning_effort="<reasoning>" <session-id> <prompt>`; stdout и stderr напрямую наследуют TTY, поэтому session activation доставляется agent-specific hook.
+- Non-human stdout является JSONL event stream; первое событие `{"type":"thread.started","thread_id":"<session-id>"}` фиксирует native session activation, повтор того же ID идемпотентен, другой ID внутри одного process противоречив, а отсутствие события или невалидная JSON-строка являются adapter error.
+- Неизвестные валидные JSONL events игнорируются для recovery; событие `item.completed` с `item.type = "agent_message"` и строковым `item.text` обновляет только volatile Agent session view.
+
+## Claude Agent type
+
+- Type `claude` принимает непустой `model` и `reasoning` из множества `low`, `medium`, `high`, `xhigh`, `max`; executable по умолчанию — `claude`.
+- Новая non-human session запускается как `claude --print --output-format stream-json --verbose --model <model> --effort <reasoning> <prompt>`, а native resume добавляет `--resume <session-id>` перед prompt.
+- Новая human session запускается как `claude --model <model> --effort <reasoning> <prompt>`, а native resume добавляет `--resume <session-id>` перед prompt; stdout и stderr напрямую наследуют TTY, поэтому session activation доставляется agent-specific hook.
+- Non-human stdout является JSONL event stream; первое событие `{"type":"system","subtype":"init","session_id":"<session-id>"}` фиксирует native session activation, повтор того же ID идемпотентен, другой ID внутри одного process противоречив, а отсутствие init или невалидная JSON-строка являются adapter error.
+- Неизвестные валидные JSONL events игнорируются для recovery; событие `assistant` с текстовыми content blocks обновляет только volatile Agent session view.
+
 ## Главный workflow
 
 1. `orchestrator start` получает выбранный workflow, строит его полный materialized candidate в памяти и применяет те же проверки, что `validate`, не создавая данных run.

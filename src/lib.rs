@@ -6,8 +6,8 @@ pub mod run;
 pub mod workflow;
 
 pub use agent::{
-    AgentCancellation, AgentExit, AgentInput, AgentRegistry, AgentRunRequest, AttemptControl,
-    BuiltinAgentRegistry, ProcessAgentRegistry, TerminationSignal,
+    AgentCancellation, AgentExit, AgentInput, AgentRegistry, AgentRunRequest, AgentSessionObserver,
+    AttemptControl, BuiltinAgentRegistry, ProcessAgentRegistry, TerminationSignal,
 };
 pub use config::{CommandError, ConfigCommand, ConfigKey, ProcessEnvironment, execute_config};
 pub use run::{

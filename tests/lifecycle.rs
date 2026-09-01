@@ -30,6 +30,217 @@ struct LifecycleWorld {
     max_concurrency: usize,
     sent_signal: Option<String>,
     shutdown_elapsed: Option<Duration>,
+    agent_type: Option<String>,
+    protocol_case: Option<String>,
+}
+
+#[given(expr = "подготовлен single-step workflow для Agent type {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn workflow_for_agent_type(world: &mut LifecycleWorld, agent_type: String) {
+    prepare_workflow(world, &[]);
+    let root = world.root.as_ref().expect("scenario must define root");
+    fs::write(
+        root.path().join("config.yaml"),
+        format!(
+            "default-agent: main\nagents:\n  main:\n    type: {agent_type}\n    model: model\n    reasoning: high\n"
+        ),
+    )
+    .expect("config must be written");
+    world.agent_type = Some(agent_type);
+}
+
+#[given("process Agent записывает args и environment и завершает attempt")]
+fn process_agent_records_contract(world: &mut LifecycleWorld) {
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ORC_HOME/agent.args\"\nprintf '%s\\n%s\\n%s\\n%s\\n' \"$ORC_STEP_ID\" \"$ORC_RUN_ID\" \"$ORC_ATTEMPT\" \"$ORC_CONTROL_ENDPOINT\" > \"$ORC_HOME/agent.env\"\nprintf '%s' \"$ORC_INPUT\" > \"$ORC_HOME/agent.input\"\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n",
+    );
+}
+
+#[given("ORC_AGENT_COMMAND указывает на отсутствующий absolute path")]
+fn missing_process_agent(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    world.process_agent = Some(root.path().join("missing-agent"));
+}
+
+#[then(expr = "process Agent получил точные args для {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn exact_agent_args(world: &mut LifecycleWorld, agent_type: String) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let args =
+        fs::read_to_string(root.path().join("agent.args")).expect("Agent args must be readable");
+    let actual: Vec<&str> = args.lines().collect();
+    let expected = match agent_type.as_str() {
+        "codex" => vec![
+            "exec",
+            "--json",
+            "--model",
+            "model",
+            "--config",
+            "model_reasoning_effort=\"high\"",
+            "",
+        ],
+        "claude" => vec![
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--model",
+            "model",
+            "--effort",
+            "high",
+            "",
+        ],
+        other => panic!("unknown Agent type: {other}"),
+    };
+    assert_eq!(actual, expected);
+}
+
+#[then("process Agent получил полный control environment")]
+fn full_agent_environment(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let environment = fs::read_to_string(root.path().join("agent.env"))
+        .expect("Agent environment must be readable");
+    let values: Vec<&str> = environment.lines().collect();
+    assert_eq!(values[0], "first");
+    assert_eq!(
+        values[1],
+        world.run_id.as_deref().expect("run ID must exist")
+    );
+    assert_eq!(values[2], "0");
+    assert!(PathBuf::from(values[3]).is_absolute());
+    assert_eq!(
+        fs::read_to_string(root.path().join("agent.input")).expect("Agent input must be readable"),
+        "[]\n"
+    );
+}
+
+#[then("сырой Agent protocol отсутствует в выводе")]
+fn raw_protocol_is_hidden(world: &mut LifecycleWorld) {
+    let observed = world.observed();
+    assert!(
+        observed
+            .lines
+            .iter()
+            .all(|line| !line.contains("thread.started"))
+    );
+    assert!(
+        observed
+            .error
+            .as_deref()
+            .is_none_or(|error| !error.contains("session_id"))
+    );
+}
+
+#[then("initial attempt не создан")]
+fn initial_attempt_not_created(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let run_root = root.path().join("run");
+    assert!(
+        !run_root.exists()
+            || fs::read_dir(run_root)
+                .expect("run root must be readable")
+                .next()
+                .is_none()
+    );
+}
+
+#[given(expr = "process Agent публикует два сообщения для {word} и завершает attempt")]
+#[allow(clippy::needless_pass_by_value)]
+fn process_agent_publishes_messages(world: &mut LifecycleWorld, agent_type: String) {
+    let events = match agent_type.as_str() {
+        "codex" => {
+            "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"first\"}}'\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\" second\\n  message \"}}'"
+        }
+        "claude" => {
+            "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first\"}]}}'\nprintf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\" second\\n  message \"}]}}'"
+        }
+        other => panic!("unknown Agent type: {other}"),
+    };
+    prepare_process_agent(
+        world,
+        &format!("#!/bin/sh\n{events}\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n"),
+    );
+}
+
+#[then("TTY board показывает 2 и последнее сообщение одной строкой")]
+fn board_shows_normalized_message(world: &mut LifecycleWorld) {
+    assert!(
+        world
+            .observed()
+            .lines
+            .iter()
+            .any(|line| line.contains("first · 2 · second message"))
+    );
+}
+
+#[then("Agent board отсутствует в выводе")]
+fn board_is_absent(world: &mut LifecycleWorld) {
+    assert!(
+        world
+            .observed()
+            .lines
+            .iter()
+            .all(|line| !line.contains("Agent sessions:"))
+    );
+}
+
+#[then("session view отсутствует в durable run")]
+fn session_view_is_not_durable(world: &mut LifecycleWorld) {
+    let run = run_directory(world);
+    for entry in fs::read_dir(run).expect("run directory must be readable") {
+        let path = entry.expect("run entry must be readable").path();
+        if path.is_file() {
+            let bytes = fs::read(path).expect("durable file must be readable");
+            assert!(
+                !bytes
+                    .windows(b"second message".len())
+                    .any(|window| window == b"second message")
+            );
+        }
+    }
+}
+
+#[given(expr = "process Agent для {word} возвращает {word} protocol")]
+#[allow(clippy::needless_pass_by_value)]
+fn process_agent_returns_protocol(
+    world: &mut LifecycleWorld,
+    agent_type: String,
+    protocol_case: String,
+) {
+    let session = |id: &str| match agent_type.as_str() {
+        "codex" => format!("{{\"type\":\"thread.started\",\"thread_id\":\"{id}\"}}"),
+        "claude" => format!("{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{id}\"}}"),
+        other => panic!("unknown Agent type: {other}"),
+    };
+    let lines = match protocol_case.as_str() {
+        "malformed" => vec!["not-json".to_owned()],
+        "missing" => Vec::new(),
+        "contradictory" => vec![session("first-session"), session("second-session")],
+        other => panic!("unknown protocol case: {other}"),
+    };
+    let body = lines
+        .iter()
+        .map(|line| format!("printf '%s\\n' '{line}'"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    prepare_raw_process_agent(world, &format!("#!/bin/sh\n{body}\n"));
+    world.protocol_case = Some(protocol_case);
+}
+
+#[then("protocol failure не создал выдуманную session")]
+fn protocol_failure_has_no_invented_session(world: &mut LifecycleWorld) {
+    let text = fs::read_to_string(run_directory(world).join("0.first.attempt.yaml"))
+        .expect("attempt record must be readable");
+    let sessions: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("  session-id: "))
+        .collect();
+    if world.protocol_case.as_deref() == Some("contradictory") {
+        assert_eq!(sessions, ["first-session"]);
+    } else {
+        assert!(sessions.is_empty());
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -607,7 +818,7 @@ fn process_session_round_trip(world: &mut LifecycleWorld) {
     );
     prepare_process_agent(
         world,
-        "#!/bin/sh\ntest \"$ORC_RESUME_SESSION\" = process-session || exit 9\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n",
+        "#!/bin/sh\ntest \"$ORC_RESUME_SESSION\" = process-session || exit 9\ntest \"$1|$2|$3|$4|$5|$6|$7|$8|$9\" = 'exec|resume|--json|--model|model|--config|model_reasoning_effort=\"high\"|process-session|' || exit 9\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n",
     );
     let root = world.root.as_ref().expect("scenario must define root");
     let agent = world
@@ -1063,6 +1274,7 @@ fn start_through_process(world: &mut LifecycleWorld) {
 }
 
 #[when("human workflow запускается через системный pseudo-terminal")]
+#[when("workflow запускается через pseudo-terminal")]
 fn start_human_through_terminal(world: &mut LifecycleWorld) {
     let root = world.root.as_ref().expect("scenario must define root");
     let agent = world
@@ -1353,7 +1565,11 @@ fn durable_activations(world: &mut LifecycleWorld) {
 fn durable_process_activation(world: &mut LifecycleWorld) {
     let text = fs::read_to_string(run_directory(world).join("0.first.attempt.yaml"))
         .expect("attempt record must be readable");
-    assert!(text.contains("session-id: process-session"));
+    assert!(
+        text.contains("session-id: process-session"),
+        "attempt={text}; observed={:?}",
+        world.observed
+    );
 }
 
 #[then("каталог неизвестного run не создан")]
@@ -1848,6 +2064,28 @@ fn prepare_process_agent(world: &mut LifecycleWorld, script: &str) {
 
     let root = world.root.as_ref().expect("scenario must define root");
     let path = root.path().join("fake-agent.sh");
+    let body = script
+        .strip_prefix("#!/bin/sh\n")
+        .expect("process Agent fixture must have a shell header");
+    let session_id = if script.contains("process-session") {
+        "process-session"
+    } else {
+        "fake-session"
+    };
+    let script = format!(
+        "#!/bin/sh\ncase \"$1\" in\n  exec) printf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"{session_id}\"}}' ;;\n  --print) printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{session_id}\"}}' ;;\nesac\n{body}"
+    );
+    fs::write(&path, script).expect("process Agent must be written");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+        .expect("process Agent must be executable");
+    world.process_agent = Some(path);
+}
+
+fn prepare_raw_process_agent(world: &mut LifecycleWorld, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = world.root.as_ref().expect("scenario must define root");
+    let path = root.path().join("fake-agent.sh");
     fs::write(&path, script).expect("process Agent must be written");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
         .expect("process Agent must be executable");
@@ -2088,4 +2326,5 @@ async fn main() {
     LifecycleWorld::run("features/recovery.feature").await;
     LifecycleWorld::run("features/human_execution.feature").await;
     LifecycleWorld::run("features/signal_shutdown.feature").await;
+    LifecycleWorld::run("features/agent_types.feature").await;
 }

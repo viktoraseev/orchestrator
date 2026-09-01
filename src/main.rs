@@ -1,18 +1,20 @@
 //! Тонкий CLI-вход: разбирает аргументы, подключает process-зависимости и отображает результат библиотечного API.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use orchestrator::{
-    CommandError, ConfigCommand, ConfigKey, LifecycleCommand, LifecycleReporter, LifecycleSignals,
-    ProcessAgentRegistry, ProcessEnvironment, RunId, TerminalMode, TerminationSignal,
-    ValidateCommand, execute_config, execute_lifecycle, execute_validate, send_attempt_completion,
-    send_session_activation,
+    AgentSessionObserver, CommandError, ConfigCommand, ConfigKey, LifecycleCommand,
+    LifecycleReporter, LifecycleSignals, ProcessAgentRegistry, ProcessEnvironment, RunId,
+    TerminalMode, TerminationSignal, ValidateCommand, execute_config, execute_lifecycle,
+    execute_validate, send_attempt_completion, send_session_activation,
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -99,6 +101,93 @@ impl LifecycleReporter for StdoutReporter {
         let mut stdout = io::stdout().lock();
         writeln!(stdout, "{value}")?;
         stdout.flush()
+    }
+}
+
+#[derive(Debug, Default)]
+struct AgentBoardState {
+    attempts: BTreeMap<u64, AgentBoardRow>,
+    humans: BTreeSet<u64>,
+}
+
+#[derive(Debug)]
+struct AgentBoardRow {
+    step_id: String,
+    messages: usize,
+    last_message: String,
+}
+
+#[derive(Debug, Default)]
+struct TerminalAgentBoard(Mutex<AgentBoardState>);
+
+impl TerminalAgentBoard {
+    fn render(state: &AgentBoardState) {
+        if !state.humans.is_empty() || state.attempts.is_empty() {
+            return;
+        }
+        let mut stdout = io::stdout().lock();
+        let _ = writeln!(stdout, "\r\x1b[2KAgent sessions:");
+        for row in state.attempts.values() {
+            let _ = writeln!(
+                stdout,
+                "\x1b[2K  {} · {} · {}",
+                row.step_id, row.messages, row.last_message
+            );
+        }
+        let _ = stdout.flush();
+    }
+}
+
+impl AgentSessionObserver for TerminalAgentBoard {
+    fn started(&self, attempt: u64, step_id: &str, human: bool) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if human {
+            state.humans.insert(attempt);
+        } else {
+            state.attempts.insert(
+                attempt,
+                AgentBoardRow {
+                    step_id: step_id.to_owned(),
+                    messages: 0,
+                    last_message: String::new(),
+                },
+            );
+        }
+        Self::render(&state);
+    }
+
+    fn message(&self, attempt: u64, step_id: &str, message: &str) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let row = state
+            .attempts
+            .entry(attempt)
+            .or_insert_with(|| AgentBoardRow {
+                step_id: step_id.to_owned(),
+                messages: 0,
+                last_message: String::new(),
+            });
+        row.messages = row.messages.saturating_add(1);
+        message.clone_into(&mut row.last_message);
+        Self::render(&state);
+    }
+
+    fn finished(&self, attempt: u64, _step_id: &str, human: bool) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if human {
+            state.humans.remove(&attempt);
+        } else {
+            state.attempts.remove(&attempt);
+        }
+        Self::render(&state);
     }
 }
 
@@ -194,6 +283,11 @@ fn run_lifecycle(
         TerminalMode::Available
     } else {
         TerminalMode::Unavailable
+    };
+    let registry = if terminal == TerminalMode::Available {
+        registry.with_session_observer(Arc::new(TerminalAgentBoard::default()))
+    } else {
+        registry
     };
     let signals = LifecycleSignals::default();
     install_signal_listener(&signals)?;

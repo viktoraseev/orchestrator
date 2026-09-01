@@ -12,11 +12,12 @@ use std::thread;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use orchestrator::{
-    AgentSessionObserver, CommandError, ConfigCommand, ConfigKey, LifecycleCommand,
-    LifecycleReporter, LifecycleSignals, ProcessAgentRegistry, ProcessEnvironment, RunId,
-    TerminalMode, TerminationSignal, ValidateCommand, execute_config, execute_lifecycle,
-    execute_run_list, execute_run_show, execute_validate, open_run_artifact,
-    send_attempt_completion, send_session_activation,
+    AgentSessionObserver, CommandError, ConfigCommand, ConfigKey, InspectionFormat,
+    InspectionReporter, LifecycleCommand, LifecycleReporter, LifecycleSignals,
+    ProcessAgentRegistry, ProcessEnvironment, RunId, RunInspectionState, TerminalMode,
+    TerminationSignal, ValidateCommand, execute_config, execute_lifecycle, execute_run_artifacts,
+    execute_run_list_formatted, execute_run_show_formatted, execute_run_verify, execute_run_watch,
+    execute_validate, open_run_artifact, send_attempt_completion, send_session_activation,
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -59,15 +60,71 @@ enum TopLevelCommand {
 
 #[derive(Debug, Subcommand)]
 enum RunCliCommand {
-    List,
+    List {
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
+        #[arg(long, value_enum, action = clap::ArgAction::Append)]
+        state: Vec<RunStateArgument>,
+        #[arg(long)]
+        workflow: Option<String>,
+    },
     Show {
         run_id: String,
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
+    },
+    Artifacts {
+        run_id: String,
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
     },
     Artifact {
         run_id: String,
         attempt: String,
         input_id: String,
     },
+    Watch {
+        run_id: String,
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
+    },
+    Verify {
+        run_id: Option<String>,
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum InspectionFormatArgument {
+    Text,
+    Json,
+}
+
+impl From<InspectionFormatArgument> for InspectionFormat {
+    fn from(value: InspectionFormatArgument) -> Self {
+        match value {
+            InspectionFormatArgument::Text => Self::Text,
+            InspectionFormatArgument::Json => Self::Json,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RunStateArgument {
+    Active,
+    Blocked,
+    Completed,
+}
+
+impl From<RunStateArgument> for RunInspectionState {
+    fn from(value: RunStateArgument) -> Self {
+        match value {
+            RunStateArgument::Active => Self::Active,
+            RunStateArgument::Blocked => Self::Blocked,
+            RunStateArgument::Completed => Self::Completed,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -117,6 +174,14 @@ struct StdoutReporter;
 
 impl LifecycleReporter for StdoutReporter {
     fn line(&mut self, value: &str) -> Result<(), io::Error> {
+        let mut stdout = io::stdout().lock();
+        writeln!(stdout, "{value}")?;
+        stdout.flush()
+    }
+}
+
+impl InspectionReporter for StdoutReporter {
+    fn snapshot(&mut self, value: &str) -> Result<(), io::Error> {
         let mut stdout = io::stdout().lock();
         writeln!(stdout, "{value}")?;
         stdout.flush()
@@ -224,6 +289,14 @@ fn main() -> ExitCode {
     };
     match dispatch(cli.command, &environment) {
         Ok(CommandOutput::Text(output)) => write_text_output(&output),
+        Ok(CommandOutput::TextWithCode(output, code)) => {
+            let written = write_text_output(&output);
+            if written == ExitCode::SUCCESS {
+                ExitCode::from(code)
+            } else {
+                written
+            }
+        }
         Ok(CommandOutput::Artifact(file)) => write_artifact_output(file),
         Ok(CommandOutput::None) => ExitCode::SUCCESS,
         Err(error) => {
@@ -236,6 +309,7 @@ fn main() -> ExitCode {
 enum CommandOutput {
     None,
     Text(String),
+    TextWithCode(String, u8),
     Artifact(File),
 }
 
@@ -296,27 +370,7 @@ fn dispatch(
             )?;
             Ok(CommandOutput::None)
         }
-        TopLevelCommand::Run { command } => match command {
-            RunCliCommand::List => execute_run_list(environment).map(CommandOutput::Text),
-            RunCliCommand::Show { run_id } => {
-                execute_run_show(parse_inspection_run_id(&run_id, "run show")?, environment)
-                    .map(CommandOutput::Text)
-            }
-            RunCliCommand::Artifact {
-                run_id,
-                attempt,
-                input_id,
-            } => {
-                let run_id = parse_inspection_run_id(&run_id, "run artifact")?;
-                let attempt = attempt.parse::<u64>().map_err(|_| CommandError::Syntax {
-                    context: format!(
-                        "run artifact: attempt '{attempt}' должен быть десятичным integer"
-                    ),
-                })?;
-                open_run_artifact(run_id, attempt, &input_id, environment)
-                    .map(CommandOutput::Artifact)
-            }
-        },
+        TopLevelCommand::Run { command } => dispatch_run(command, environment),
         TopLevelCommand::Session {
             command: SessionCliCommand::Activate { session_id },
         } => {
@@ -334,6 +388,69 @@ fn dispatch(
                 .collect();
             send_attempt_completion(&endpoint, run_id, attempt, artifacts)?;
             Ok(CommandOutput::None)
+        }
+    }
+}
+
+fn dispatch_run(
+    command: RunCliCommand,
+    environment: &ProcessEnvironment,
+) -> Result<CommandOutput, CommandError> {
+    match command {
+        RunCliCommand::List {
+            format,
+            state,
+            workflow,
+        } => {
+            let states = state.into_iter().map(Into::into).collect::<Vec<_>>();
+            execute_run_list_formatted(environment, format.into(), &states, workflow.as_deref())
+                .map(CommandOutput::Text)
+        }
+        RunCliCommand::Show { run_id, format } => execute_run_show_formatted(
+            parse_inspection_run_id(&run_id, "run show")?,
+            environment,
+            format.into(),
+        )
+        .map(CommandOutput::Text),
+        RunCliCommand::Artifacts { run_id, format } => execute_run_artifacts(
+            parse_inspection_run_id(&run_id, "run artifacts")?,
+            environment,
+            format.into(),
+        )
+        .map(CommandOutput::Text),
+        RunCliCommand::Artifact {
+            run_id,
+            attempt,
+            input_id,
+        } => {
+            let run_id = parse_inspection_run_id(&run_id, "run artifact")?;
+            let attempt = attempt.parse::<u64>().map_err(|_| CommandError::Syntax {
+                context: format!(
+                    "run artifact: attempt '{attempt}' должен быть десятичным integer"
+                ),
+            })?;
+            open_run_artifact(run_id, attempt, &input_id, environment).map(CommandOutput::Artifact)
+        }
+        RunCliCommand::Watch { run_id, format } => {
+            let signals = LifecycleSignals::default();
+            install_signal_listener(&signals)?;
+            execute_run_watch(
+                parse_inspection_run_id(&run_id, "run watch")?,
+                environment,
+                format.into(),
+                &signals,
+                &mut StdoutReporter,
+            )?;
+            Ok(CommandOutput::None)
+        }
+        RunCliCommand::Verify { run_id, format } => {
+            let run_id = run_id
+                .as_deref()
+                .map(|value| parse_inspection_run_id(value, "run verify"))
+                .transpose()?;
+            let (output, report) = execute_run_verify(run_id, environment, format.into())?;
+            let code = if report.is_valid() { 0 } else { 3 };
+            Ok(CommandOutput::TextWithCode(output, code))
         }
     }
 }

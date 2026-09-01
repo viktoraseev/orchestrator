@@ -6,7 +6,9 @@ use std::process::Command;
 
 use cucumber::{World, given, then, when};
 use fs2::FileExt;
-use orchestrator::{ProcessEnvironment, RunId, execute_run_list, execute_run_show};
+use orchestrator::{
+    ProcessEnvironment, RunId, RunInspection, execute_run_list, execute_run_show, inspect_run,
+};
 use tempfile::TempDir;
 
 #[derive(Debug, Default, World)]
@@ -15,6 +17,7 @@ struct InspectionWorld {
     observed: Option<Observed>,
     durable_snapshot: Vec<(PathBuf, Vec<u8>)>,
     lock: Option<File>,
+    typed_snapshot: Option<RunInspection>,
 }
 
 #[derive(Debug)]
@@ -92,6 +95,24 @@ fn versioned_binary_artifacts(world: &mut InspectionWorld) {
         .expect("second artifact must be written");
 }
 
+#[given(expr = "подготовлен completed durable run {int}")]
+fn completed_durable_run(world: &mut InspectionWorld, run_id: u64) {
+    empty_inspection_root(world);
+    write_completed_run(world.root(), run_id);
+}
+
+#[given("подготовлены valid и два противоречивых durable runs")]
+fn valid_and_two_invalid_runs(world: &mut InspectionWorld) {
+    empty_inspection_root(world);
+    write_completed_run(world.root(), 10);
+    for run_id in [20_u64, 30] {
+        let directory = run_directory(world.root(), run_id);
+        fs::create_dir_all(&directory).expect("invalid run directory must be created");
+        fs::write(directory.join("active.lock"), []).expect("lock file must be written");
+        fs::write(directory.join("spec.yaml"), b"steps: [").expect("invalid spec must be written");
+    }
+}
+
 #[when("выполняется run list через публичный API")]
 fn list_through_api(world: &mut InspectionWorld) {
     world.capture_snapshot();
@@ -114,10 +135,73 @@ fn list_through_cli(world: &mut InspectionWorld) {
     run_cli(world, ["run", "list"]);
 }
 
+#[when("запускается orchestrator run list для completed workflow")]
+fn filtered_list_through_cli(world: &mut InspectionWorld) {
+    run_cli(
+        world,
+        [
+            "run",
+            "list",
+            "--state",
+            "completed",
+            "--workflow",
+            "completed",
+        ],
+    );
+}
+
 #[when(expr = "запускается orchestrator run show {word}")]
 #[allow(clippy::needless_pass_by_value)]
 fn show_through_cli(world: &mut InspectionWorld, run_id: String) {
     run_cli(world, ["run", "show", &run_id]);
+}
+
+#[when(expr = "запускается orchestrator run show {word} в JSON")]
+#[allow(clippy::needless_pass_by_value)]
+fn show_json_through_cli(world: &mut InspectionWorld, run_id: String) {
+    run_cli(world, ["run", "show", &run_id, "--format", "json"]);
+}
+
+#[when(expr = "запускается orchestrator run artifacts {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn artifacts_through_cli(world: &mut InspectionWorld, run_id: String) {
+    run_cli(world, ["run", "artifacts", &run_id]);
+}
+
+#[when(expr = "строится typed inspection snapshot run {int} через публичный API")]
+fn typed_snapshot_through_api(world: &mut InspectionWorld, run_id: u64) {
+    world.capture_snapshot();
+    match inspect_run(
+        RunId::parse(&run_id.to_string()).expect("fixture RunId must be valid"),
+        &environment(world.root()),
+    ) {
+        Ok(snapshot) => {
+            world.typed_snapshot = Some(snapshot);
+            world.observed = Some(Observed {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: String::new(),
+            });
+        }
+        Err(error) => {
+            world.observed = Some(Observed {
+                exit_code: error.exit_code(),
+                stdout: Vec::new(),
+                stderr: error.to_string(),
+            });
+        }
+    }
+}
+
+#[when(expr = "запускается orchestrator run watch {word} в JSON")]
+#[allow(clippy::needless_pass_by_value)]
+fn watch_json_through_cli(world: &mut InspectionWorld, run_id: String) {
+    run_cli(world, ["run", "watch", &run_id, "--format", "json"]);
+}
+
+#[when("запускается orchestrator run verify в JSON")]
+fn verify_json_through_cli(world: &mut InspectionWorld) {
+    run_cli(world, ["run", "verify", "--format", "json"]);
 }
 
 #[when(expr = "запускается orchestrator run artifact {word} {word} {word}")]
@@ -174,6 +258,69 @@ fn show_contains_active_run(world: &mut InspectionWorld) {
 #[then("stdout побайтово равен первой версии artifact")]
 fn stdout_is_first_artifact(world: &mut InspectionWorld) {
     assert_eq!(world.observed().stdout, [0, 0xff, b'\n']);
+}
+
+#[then("список artifacts содержит две опубликованные версии")]
+fn artifacts_list_has_two_versions(world: &mut InspectionWorld) {
+    let output = world.stdout_text();
+    assert!(output.contains("artifact 0: step=first input=result bytes=3 path="));
+    assert!(output.contains("artifact 2: step=first input=result bytes=6 path="));
+    assert!(!output.contains("artifact 1:"));
+}
+
+#[then("typed snapshot содержит две версии result")]
+fn typed_snapshot_has_two_versions(world: &mut InspectionWorld) {
+    let snapshot = world
+        .typed_snapshot
+        .as_ref()
+        .expect("typed snapshot must be captured");
+    assert_eq!(snapshot.run_id(), 30);
+    assert_eq!(snapshot.artifacts().len(), 2);
+    assert!(
+        snapshot
+            .artifacts()
+            .iter()
+            .all(|artifact| artifact.input() == "result")
+    );
+    assert_eq!(snapshot.artifacts()[0].attempt(), 0);
+    assert_eq!(snapshot.artifacts()[1].attempt(), 2);
+}
+
+#[then(expr = "JSON show содержит typed snapshot run {int}")]
+fn json_show_has_typed_snapshot(world: &mut InspectionWorld, run_id: u64) {
+    let value: serde_json::Value =
+        serde_json::from_slice(&world.observed().stdout).expect("show stdout must be JSON");
+    assert_eq!(value["run_id"], run_id);
+    assert_eq!(value["attempts"][0]["number"], 0);
+    assert_eq!(value["attempts"][0]["session"], "native-session");
+    assert!(value["artifacts"].is_array());
+}
+
+#[then("inspection output содержит только completed run")]
+fn filtered_output_contains_only_completed(world: &mut InspectionWorld) {
+    assert_eq!(
+        world.stdout_text(),
+        "run 30: workflow=completed state=completed\n"
+    );
+}
+
+#[then("watch опубликовал один JSON snapshot")]
+fn watch_published_one_json_snapshot(world: &mut InspectionWorld) {
+    let lines = world.stdout_text().lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(lines[0]).expect("watch line must be JSON");
+    assert_eq!(value["run_id"], 30);
+    assert_eq!(value["state"], "completed");
+}
+
+#[then("verify report содержит все три runs")]
+fn verify_report_contains_all_runs(world: &mut InspectionWorld) {
+    let value: serde_json::Value =
+        serde_json::from_slice(&world.observed().stdout).expect("verify stdout must be JSON");
+    assert_eq!(value["runs"].as_array().map(Vec::len), Some(3));
+    assert_eq!(value["runs"][0]["valid"], true);
+    assert_eq!(value["runs"][1]["valid"], false);
+    assert_eq!(value["runs"][2]["valid"], false);
 }
 
 #[then("inspection не изменил durable state")]

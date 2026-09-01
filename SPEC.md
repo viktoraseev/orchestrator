@@ -178,8 +178,13 @@ type из materialized workflow и полного содержимого Agent a
 ## Read-only inspection
 
 - Read-only inspection загружает materialized workflow, attempts и artifacts через ту же validation границу, что `resume`, но не получает Run lock, не создаёт control endpoint и не запускает Agent; поэтому оно может наблюдать run при удерживаемом другим supervisor lock и не меняет durable или volatile состояние.
+- Storage boundary сравнивает fingerprint всех durable `spec.yaml`, `*.attempt.yaml` и `*.artifact` до и после validation, повторяет изменившийся snapshot не более четырёх раз, возвращает стабильную противоречивую модель как validation error и непрерывно меняющуюся модель как runtime error; `active.lock` и временные entries в fingerprint не входят.
 - Состояние, frontier, последняя session и соответствие artifacts вычисляются только из полной durable-модели; производный status не записывается, а orphan artifacts и временные файлы не становятся частью результата.
 - Выбор artifact использует точный глобальный attempt number и объявленный InputId завершённого Step, поэтому inspection никогда не заменяет запрошенную версию последней версией того же Step.
+- Typed inspection read model содержит RunId, WorkflowId, состояние, Steps, attempts с последней session, frontier и дескрипторы опубликованных artifacts; text и JSON являются только представлениями одной модели.
+- Фильтры списка применяются после validation всех числовых run directories, поэтому скрытый фильтром противоречивый run остаётся ошибкой.
+- Watch сразу публикует initial typed snapshot, затем с фиксированным интервалом 100 ms публикует только изменившиеся validated snapshots и завершается на `blocked`, `completed` или поддерживаемом termination signal.
+- Verify проверяет выбранный либо все числовые run directories в порядке RunId, продолжает после независимых validation errors других runs и определяет итоговый код только после формирования полного отчёта.
 
 ## Codex Agent type
 

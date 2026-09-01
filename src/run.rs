@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -11,7 +12,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ use crate::config::{CommandError, ProcessEnvironment, RawAgent, resolve_state_ro
 use crate::workflow::{ValidateCommand, Workflow, materialize_for_lifecycle};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const INSPECTION_SNAPSHOT_ATTEMPTS: usize = 4;
+const INSPECTION_WATCH_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Команда публичного lifecycle API после разбора CLI.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,6 +125,261 @@ impl RunId {
 impl std::fmt::Display for RunId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
+    }
+}
+
+/// Формат представления read-only inspection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum InspectionFormat {
+    /// Стабильное человекочитаемое представление.
+    Text,
+    /// Документ JSON по схеме `cli.md`.
+    Json,
+}
+
+/// Вычисленное состояние validated durable run.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[non_exhaustive]
+#[serde(rename_all = "lowercase")]
+pub enum RunInspectionState {
+    /// Run содержит незавершённый attempt или ready frontier.
+    Active,
+    /// Run валиден, но не имеет запускаемой работы.
+    Blocked,
+    /// Все достижимые Steps завершены.
+    Completed,
+}
+
+impl RunInspectionState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Blocked => "blocked",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+/// Typed read model одного согласованного durable snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct RunInspection {
+    run_id: u64,
+    workflow: String,
+    state: RunInspectionState,
+    steps: Vec<StepInspection>,
+    attempts: Vec<AttemptInspection>,
+    frontier: FrontierInspection,
+    artifacts: Vec<ArtifactInspection>,
+}
+
+impl RunInspection {
+    /// Возвращает `RunId` snapshot.
+    #[must_use]
+    pub const fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
+    /// Возвращает materialized `WorkflowId`.
+    #[must_use]
+    pub fn workflow(&self) -> &str {
+        &self.workflow
+    }
+
+    /// Возвращает вычисленное состояние run.
+    #[must_use]
+    pub const fn state(&self) -> RunInspectionState {
+        self.state
+    }
+
+    /// Возвращает опубликованные artifacts в deterministic durable order.
+    #[must_use]
+    pub fn artifacts(&self) -> &[ArtifactInspection] {
+        &self.artifacts
+    }
+
+    /// Возвращает Steps в materialized order.
+    #[must_use]
+    pub fn steps(&self) -> &[StepInspection] {
+        &self.steps
+    }
+
+    /// Возвращает attempts в порядке глобального номера.
+    #[must_use]
+    pub fn attempts(&self) -> &[AttemptInspection] {
+        &self.attempts
+    }
+
+    /// Возвращает вычисленный frontier.
+    #[must_use]
+    pub const fn frontier(&self) -> &FrontierInspection {
+        &self.frontier
+    }
+}
+
+/// Step в typed inspection read model.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct StepInspection {
+    id: String,
+    attempts: Vec<u64>,
+}
+
+impl StepInspection {
+    /// Возвращает `StepId`.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Возвращает глобальные номера attempts этого Step.
+    #[must_use]
+    pub fn attempts(&self) -> &[u64] {
+        &self.attempts
+    }
+}
+
+/// Attempt в typed inspection read model.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct AttemptInspection {
+    number: u64,
+    step: String,
+    state: AttemptInspectionState,
+    session: Option<String>,
+    input: Vec<u64>,
+}
+
+impl AttemptInspection {
+    /// Возвращает глобальный номер attempt.
+    #[must_use]
+    pub const fn number(&self) -> u64 {
+        self.number
+    }
+
+    /// Возвращает `StepId` attempt.
+    #[must_use]
+    pub fn step(&self) -> &str {
+        &self.step
+    }
+
+    /// Возвращает вычисленное состояние attempt.
+    #[must_use]
+    pub const fn state(&self) -> AttemptInspectionState {
+        self.state
+    }
+
+    /// Возвращает последнюю durable session activation.
+    #[must_use]
+    pub fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    /// Возвращает input mapping attempt.
+    #[must_use]
+    pub fn input(&self) -> &[u64] {
+        &self.input
+    }
+}
+
+/// Вычисленное состояние attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+#[serde(rename_all = "lowercase")]
+pub enum AttemptInspectionState {
+    /// Completion ещё не опубликован.
+    Active,
+    /// Терминальное completion-событие опубликовано.
+    Completed,
+}
+
+/// Frontier typed inspection read model.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct FrontierInspection {
+    ready: Vec<String>,
+    missing: Vec<String>,
+}
+
+impl FrontierInspection {
+    /// Возвращает ready `StepId` в workflow order.
+    #[must_use]
+    pub fn ready(&self) -> &[String] {
+        &self.ready
+    }
+
+    /// Возвращает недостающие dependencies в deterministic order.
+    #[must_use]
+    pub fn missing(&self) -> &[String] {
+        &self.missing
+    }
+}
+
+/// Дескриптор опубликованной версии durable artifact.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ArtifactInspection {
+    attempt: u64,
+    step: String,
+    input: String,
+    bytes: u64,
+    path: String,
+}
+
+impl ArtifactInspection {
+    /// Возвращает глобальный номер attempt.
+    #[must_use]
+    pub const fn attempt(&self) -> u64 {
+        self.attempt
+    }
+
+    /// Возвращает `StepId` publisher'а.
+    #[must_use]
+    pub fn step(&self) -> &str {
+        &self.step
+    }
+
+    /// Возвращает опубликованный `InputId`.
+    #[must_use]
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    /// Возвращает размер durable artifact.
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Возвращает абсолютный durable path в строковом JSON-compatible виде.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+/// Одна строка полного отчёта `run verify`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct RunVerification {
+    run_id: u64,
+    valid: bool,
+    diagnostics: Vec<String>,
+}
+
+/// Полный отчёт read-only validation одного или нескольких runs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct VerificationReport {
+    runs: Vec<RunVerification>,
+}
+
+impl VerificationReport {
+    /// Возвращает `true`, если каждый проверенный run валиден.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.runs.iter().all(|run| run.valid)
     }
 }
 
@@ -228,6 +486,119 @@ pub fn execute_run_list(environment: &ProcessEnvironment) -> Result<String, Comm
     Ok(output)
 }
 
+/// Строит typed snapshots всех числовых durable runs до применения фильтров.
+///
+/// # Errors
+///
+/// Возвращает ошибку чтения или validation любого run; частичный список не возвращается.
+pub fn inspect_runs(environment: &ProcessEnvironment) -> Result<Vec<RunInspection>, CommandError> {
+    let root = resolve_state_root(environment, "run list")?;
+    inspect_runs_at_root(&root, "run list")
+}
+
+/// Строит typed snapshot одного durable run.
+///
+/// # Errors
+///
+/// Возвращает `4` для неизвестного run, `3` для стабильной противоречивой модели и runtime error, если согласованный snapshot не удалось получить за ограниченное число попыток.
+pub fn inspect_run(
+    run_id: RunId,
+    environment: &ProcessEnvironment,
+) -> Result<RunInspection, CommandError> {
+    let root = resolve_state_root(environment, "run show")?;
+    load_inspected_run(&root, run_id, "run show")?.to_public("run show")
+}
+
+/// Выполняет `run list` с форматом и validated фильтрами.
+///
+/// Все runs проверяются до фильтрации, поэтому скрытая corruption не маскируется.
+///
+/// # Errors
+///
+/// Возвращает `2` для невалидного `WorkflowId`, ошибку любого durable run или сериализации результата.
+pub fn execute_run_list_formatted(
+    environment: &ProcessEnvironment,
+    format: InspectionFormat,
+    states: &[RunInspectionState],
+    workflow: Option<&str>,
+) -> Result<String, CommandError> {
+    if workflow.is_some_and(|value| !valid_id(value)) {
+        return Err(CommandError::Syntax {
+            context: format!(
+                "run list: WorkflowId '{}' не соответствует kebab-case",
+                workflow.unwrap_or_default()
+            ),
+        });
+    }
+    let runs = inspect_runs(environment)?;
+    let filtered = runs
+        .into_iter()
+        .filter(|run| states.is_empty() || states.contains(&run.state))
+        .filter(|run| workflow.is_none_or(|value| run.workflow == value))
+        .collect::<Vec<_>>();
+    render_run_list(&filtered, format)
+}
+
+fn inspect_runs_at_root(root: &Path, context: &str) -> Result<Vec<RunInspection>, CommandError> {
+    let run_root = root.join("run");
+    let entries = match fs::read_dir(&run_root) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(runtime(
+                context,
+                format!("не удалось прочитать {}", run_root.display()),
+                source,
+            ));
+        }
+    };
+    let mut run_ids = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|source| runtime(context, "не удалось прочитать durable entry", source))?;
+        if entry
+            .file_type()
+            .map_err(|source| runtime(context, "не удалось прочитать тип run entry", source))?
+            .is_dir()
+            && let Some(name) = entry.file_name().to_str()
+            && let Ok(value) = name.parse::<u64>()
+        {
+            run_ids.push(RunId(value));
+        }
+    }
+    run_ids.sort_by_key(|run_id| run_id.0);
+    run_ids
+        .into_iter()
+        .map(|run_id| load_inspected_run(root, run_id, context)?.to_public(context))
+        .collect()
+}
+
+fn render_run_list(
+    runs: &[RunInspection],
+    format: InspectionFormat,
+) -> Result<String, CommandError> {
+    match format {
+        InspectionFormat::Text => {
+            let mut output = String::new();
+            for run in runs {
+                writeln!(
+                    output,
+                    "run {}: workflow={} state={}",
+                    run.run_id,
+                    run.workflow,
+                    run.state.as_str()
+                )
+                .map_err(formatting_error)?;
+            }
+            if output.ends_with('\n') {
+                output.pop();
+            }
+            Ok(output)
+        }
+        InspectionFormat::Json => serde_json::to_string_pretty(runs).map_err(json_formatting_error),
+    }
+}
+
 /// Показывает materialized Steps, attempts и frontier одного validated durable run.
 ///
 /// Операция не получает Run lock и не меняет состояние; см. Rule «Run show отображает validated read model» в `features/run_inspection.feature`.
@@ -303,6 +674,157 @@ pub fn execute_run_show(
     .map_err(formatting_error)?;
     output.pop();
     Ok(output)
+}
+
+/// Выполняет `run show` выбранным renderer'ом.
+///
+/// # Errors
+///
+/// Возвращает ошибки consistent snapshot либо JSON serialization.
+pub fn execute_run_show_formatted(
+    run_id: RunId,
+    environment: &ProcessEnvironment,
+    format: InspectionFormat,
+) -> Result<String, CommandError> {
+    let run = inspect_run(run_id, environment)?;
+    render_run_show(&run, format, false)
+}
+
+/// Перечисляет дескрипторы artifacts опубликованных completed attempts.
+///
+/// # Errors
+///
+/// Возвращает ошибки consistent snapshot, metadata artifact либо JSON serialization.
+pub fn execute_run_artifacts(
+    run_id: RunId,
+    environment: &ProcessEnvironment,
+    format: InspectionFormat,
+) -> Result<String, CommandError> {
+    let root = resolve_state_root(environment, "run artifacts")?;
+    let run = load_inspected_run(&root, run_id, "run artifacts")?.to_public("run artifacts")?;
+    render_artifacts(&run.artifacts, format)
+}
+
+/// Приёмник полных snapshots команды `run watch`.
+pub trait InspectionReporter {
+    /// Делает один validated snapshot наблюдаемым до ожидания следующего.
+    ///
+    /// # Errors
+    ///
+    /// Возвращает ошибку вывода, после которой watch прекращается.
+    fn snapshot(&mut self, value: &str) -> Result<(), std::io::Error>;
+}
+
+/// Наблюдает active run до terminal state или termination signal.
+///
+/// Initial snapshot публикуется немедленно; последующие одинаковые snapshots не публикуются. См. Rule «Run watch публикует только изменившиеся snapshots» в `features/run_inspection.feature`.
+///
+/// # Errors
+///
+/// Возвращает ошибки consistent snapshot и reporter, либо [`CommandError::Interrupted`] с кодом первого signal.
+pub fn execute_run_watch(
+    run_id: RunId,
+    environment: &ProcessEnvironment,
+    format: InspectionFormat,
+    signals: &LifecycleSignals,
+    reporter: &mut dyn InspectionReporter,
+) -> Result<(), CommandError> {
+    let mut previous = inspect_run(run_id, environment)?;
+    report_inspection_snapshot(
+        reporter,
+        &render_run_show(&previous, format, true)?,
+        "run watch",
+    )?;
+    loop {
+        if previous.state != RunInspectionState::Active {
+            return Ok(());
+        }
+        if let Some((signal, _)) = signals.observation() {
+            return Err(CommandError::Interrupted {
+                context: format!("run watch: прерван signal {}", signal.number()),
+                exit_code: signal.exit_code(),
+            });
+        }
+        thread::park_timeout(INSPECTION_WATCH_INTERVAL);
+        let current = inspect_run(run_id, environment)?;
+        if current != previous {
+            report_inspection_snapshot(
+                reporter,
+                &render_run_show(&current, format, true)?,
+                "run watch",
+            )?;
+            previous = current;
+        }
+    }
+}
+
+/// Проверяет один или все durable runs и возвращает полный deterministic report.
+///
+/// Stable validation errors становятся diagnostics отчёта; I/O errors прерывают команду.
+///
+/// # Errors
+///
+/// Возвращает `4` для неизвестного явно выбранного run и runtime error для I/O или непрерывно меняющегося snapshot.
+pub fn execute_run_verify(
+    run_id: Option<RunId>,
+    environment: &ProcessEnvironment,
+    format: InspectionFormat,
+) -> Result<(String, VerificationReport), CommandError> {
+    let root = resolve_state_root(environment, "run verify")?;
+    let run_ids = match run_id {
+        Some(run_id) => {
+            let directory = root.join("run").join(run_id.to_string());
+            if !directory.is_dir() {
+                return Err(CommandError::NotFound {
+                    context: format!("run verify: run {run_id} не существует"),
+                });
+            }
+            vec![run_id]
+        }
+        None => numeric_run_ids(&root, "run verify")?,
+    };
+    let mut runs = Vec::with_capacity(run_ids.len());
+    for run_id in run_ids {
+        match load_inspected_run(&root, run_id, "run verify")
+            .and_then(|run| run.to_public("run verify"))
+        {
+            Ok(_) => runs.push(RunVerification {
+                run_id: run_id.0,
+                valid: true,
+                diagnostics: Vec::new(),
+            }),
+            Err(CommandError::Invalid { context }) => runs.push(RunVerification {
+                run_id: run_id.0,
+                valid: false,
+                diagnostics: vec![context],
+            }),
+            Err(error) => return Err(error),
+        }
+    }
+    let report = VerificationReport { runs };
+    let output = match format {
+        InspectionFormat::Text => {
+            let mut output = String::new();
+            for run in &report.runs {
+                if run.valid {
+                    writeln!(output, "run {}: valid", run.run_id).map_err(formatting_error)?;
+                } else {
+                    for diagnostic in &run.diagnostics {
+                        writeln!(output, "run {}: invalid: {diagnostic}", run.run_id)
+                            .map_err(formatting_error)?;
+                    }
+                }
+            }
+            if output.ends_with('\n') {
+                output.pop();
+            }
+            output
+        }
+        InspectionFormat::Json => {
+            serde_json::to_string_pretty(&report).map_err(json_formatting_error)?
+        }
+    };
+    Ok((output, report))
 }
 
 /// Открывает точную durable-версию artifact для потокового копирования caller'ом.
@@ -980,37 +1502,101 @@ struct InspectedRun {
     frontier: Frontier,
 }
 
-#[derive(Clone, Copy)]
-enum InspectedRunState {
-    Active,
-    Blocked,
-    Completed,
-}
-
-impl InspectedRunState {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Blocked => "blocked",
-            Self::Completed => "completed",
-        }
-    }
-}
-
 impl InspectedRun {
-    fn state(&self) -> InspectedRunState {
+    fn state(&self) -> RunInspectionState {
         if self
             .attempts
             .iter()
             .any(|attempt| !attempt.record.is_completed())
             || !self.frontier.ready.is_empty()
         {
-            InspectedRunState::Active
+            RunInspectionState::Active
         } else if self.frontier.missing.is_empty() {
-            InspectedRunState::Completed
+            RunInspectionState::Completed
         } else {
-            InspectedRunState::Blocked
+            RunInspectionState::Blocked
         }
+    }
+
+    fn to_public(&self, context: &str) -> Result<RunInspection, CommandError> {
+        let steps = self
+            .workflow
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(step_index, step)| StepInspection {
+                id: step.id.clone(),
+                attempts: self
+                    .attempts
+                    .iter()
+                    .filter(|attempt| attempt.step_index == step_index)
+                    .map(|attempt| attempt.number)
+                    .collect(),
+            })
+            .collect();
+        let attempts = self
+            .attempts
+            .iter()
+            .map(|attempt| AttemptInspection {
+                number: attempt.number,
+                step: self.workflow.steps[attempt.step_index].id.clone(),
+                state: if attempt.record.is_completed() {
+                    AttemptInspectionState::Completed
+                } else {
+                    AttemptInspectionState::Active
+                },
+                session: attempt.record.last_session().map(str::to_owned),
+                input: attempt.record.input.clone(),
+            })
+            .collect();
+        let frontier = FrontierInspection {
+            ready: self
+                .frontier
+                .ready
+                .iter()
+                .map(|step_index| self.workflow.steps[*step_index].id.clone())
+                .collect(),
+            missing: self.frontier.missing.clone(),
+        };
+        let mut artifacts = Vec::new();
+        for attempt in self
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.record.is_completed())
+        {
+            let step = &self.workflow.steps[attempt.step_index];
+            for input in &step.outputs {
+                let path = self
+                    .directory
+                    .join(format!("{}.{}.{input}.artifact", attempt.number, step.id));
+                let bytes = path
+                    .metadata()
+                    .map_err(|source| {
+                        runtime(
+                            context,
+                            format!("не удалось прочитать metadata {}", path.display()),
+                            source,
+                        )
+                    })?
+                    .len();
+                artifacts.push(ArtifactInspection {
+                    attempt: attempt.number,
+                    step: step.id.clone(),
+                    input: input.clone(),
+                    bytes,
+                    path: path.to_string_lossy().into_owned(),
+                });
+            }
+        }
+        Ok(RunInspection {
+            run_id: self.run_id.0,
+            workflow: self.workflow.workflow_id.clone(),
+            state: self.state(),
+            steps,
+            attempts,
+            frontier,
+            artifacts,
+        })
     }
 }
 
@@ -1025,6 +1611,52 @@ fn load_inspected_run(
             context: format!("{context}: run {run_id} не существует"),
         });
     }
+    load_inspected_run_with_hook(&directory, run_id, context, || {})
+}
+
+fn load_inspected_run_with_hook(
+    directory: &Path,
+    run_id: RunId,
+    context: &str,
+    mut after_fingerprint: impl FnMut(),
+) -> Result<InspectedRun, CommandError> {
+    let mut last_snapshot_error = None;
+    for _ in 0..INSPECTION_SNAPSHOT_ATTEMPTS {
+        let before = match durable_fingerprint(directory, context) {
+            Ok(value) => value,
+            Err(error) => {
+                last_snapshot_error = Some(error);
+                continue;
+            }
+        };
+        after_fingerprint();
+        let result = load_inspected_run_once(directory, run_id, context);
+        let after = match durable_fingerprint(directory, context) {
+            Ok(value) => value,
+            Err(error) => {
+                last_snapshot_error = Some(error);
+                continue;
+            }
+        };
+        if before == after {
+            return result;
+        }
+    }
+    let detail = last_snapshot_error.map_or_else(
+        || "durable snapshot непрерывно изменяется".to_owned(),
+        |error| format!("durable snapshot непрерывно изменяется: {error}"),
+    );
+    Err(CommandError::Runtime {
+        context: format!("{context}: run {run_id}: {detail}"),
+        source: std::io::Error::other("исчерпан лимит чтения согласованного snapshot"),
+    })
+}
+
+fn load_inspected_run_once(
+    directory: &Path,
+    run_id: RunId,
+    context: &str,
+) -> Result<InspectedRun, CommandError> {
     let spec_path = directory.join("spec.yaml");
     if !spec_path.is_file() {
         return Err(CommandError::Invalid {
@@ -1034,17 +1666,62 @@ fn load_inspected_run(
         });
     }
     let workflow: MaterializedWorkflow = read_yaml(&spec_path, context)?;
-    let attempts = load_attempts(&directory, &workflow, &BuiltinAgentRegistry, run_id)
+    let attempts = load_attempts(directory, &workflow, &BuiltinAgentRegistry, run_id)
         .map_err(|error| recontextualize(error, context))?;
     let frontier =
         compute_frontier(&workflow, &attempts).map_err(|error| recontextualize(error, context))?;
     Ok(InspectedRun {
         run_id,
-        directory,
+        directory: directory.to_owned(),
         workflow,
         attempts,
         frontier,
     })
+}
+
+fn durable_fingerprint(directory: &Path, context: &str) -> Result<u64, CommandError> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|source| {
+        runtime(
+            context,
+            format!("не удалось прочитать {}", directory.display()),
+            source,
+        )
+    })? {
+        let entry = entry
+            .map_err(|source| runtime(context, "не удалось прочитать durable entry", source))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "spec.yaml" || name.ends_with(".attempt.yaml") || name.ends_with(".artifact") {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    let mut hasher = DefaultHasher::new();
+    for path in paths {
+        path.file_name().hash(&mut hasher);
+        let metadata = fs::symlink_metadata(&path).map_err(|source| {
+            runtime(
+                context,
+                format!("не удалось прочитать metadata {}", path.display()),
+                source,
+            )
+        })?;
+        metadata.file_type().is_file().hash(&mut hasher);
+        metadata.file_type().is_symlink().hash(&mut hasher);
+        if metadata.file_type().is_file() {
+            fs::read(&path)
+                .map_err(|source| {
+                    runtime(
+                        context,
+                        format!("не удалось прочитать {}", path.display()),
+                        source,
+                    )
+                })?
+                .hash(&mut hasher);
+        }
+    }
+    Ok(hasher.finish())
 }
 
 fn recontextualize(error: CommandError, context: &str) -> CommandError {
@@ -1090,6 +1767,142 @@ fn joined_or_dash(values: &[String]) -> String {
         "-".to_owned()
     } else {
         values.join(",")
+    }
+}
+
+fn render_run_show(
+    run: &RunInspection,
+    format: InspectionFormat,
+    compact_json: bool,
+) -> Result<String, CommandError> {
+    match format {
+        InspectionFormat::Text => {
+            let mut output = String::new();
+            writeln!(
+                output,
+                "run {}: workflow={} state={}",
+                run.run_id,
+                run.workflow,
+                run.state.as_str()
+            )
+            .map_err(formatting_error)?;
+            for step in &run.steps {
+                let attempts = step.attempts.iter().map(u64::to_string).collect::<Vec<_>>();
+                writeln!(
+                    output,
+                    "step {}: attempts={}",
+                    step.id,
+                    joined_or_dash(&attempts)
+                )
+                .map_err(formatting_error)?;
+            }
+            for attempt in &run.attempts {
+                let input = attempt.input.iter().map(u64::to_string).collect::<Vec<_>>();
+                writeln!(
+                    output,
+                    "attempt {}: step={} state={} session={} input={}",
+                    attempt.number,
+                    attempt.step,
+                    match attempt.state {
+                        AttemptInspectionState::Active => "active",
+                        AttemptInspectionState::Completed => "completed",
+                    },
+                    attempt.session.as_deref().unwrap_or("-"),
+                    joined_or_dash(&input)
+                )
+                .map_err(formatting_error)?;
+            }
+            writeln!(
+                output,
+                "frontier: ready={} missing={}",
+                joined_or_dash(&run.frontier.ready),
+                joined_or_dash(&run.frontier.missing)
+            )
+            .map_err(formatting_error)?;
+            output.pop();
+            Ok(output)
+        }
+        InspectionFormat::Json if compact_json => {
+            serde_json::to_string(run).map_err(json_formatting_error)
+        }
+        InspectionFormat::Json => serde_json::to_string_pretty(run).map_err(json_formatting_error),
+    }
+}
+
+fn render_artifacts(
+    artifacts: &[ArtifactInspection],
+    format: InspectionFormat,
+) -> Result<String, CommandError> {
+    match format {
+        InspectionFormat::Text => {
+            let mut output = String::new();
+            for artifact in artifacts {
+                writeln!(
+                    output,
+                    "artifact {}: step={} input={} bytes={} path={}",
+                    artifact.attempt, artifact.step, artifact.input, artifact.bytes, artifact.path
+                )
+                .map_err(formatting_error)?;
+            }
+            if output.ends_with('\n') {
+                output.pop();
+            }
+            Ok(output)
+        }
+        InspectionFormat::Json => {
+            serde_json::to_string_pretty(artifacts).map_err(json_formatting_error)
+        }
+    }
+}
+
+fn numeric_run_ids(root: &Path, context: &str) -> Result<Vec<RunId>, CommandError> {
+    let run_root = root.join("run");
+    let entries = match fs::read_dir(&run_root) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(runtime(
+                context,
+                format!("не удалось прочитать {}", run_root.display()),
+                source,
+            ));
+        }
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|source| runtime(context, "не удалось прочитать durable entry", source))?;
+        if entry
+            .file_type()
+            .map_err(|source| runtime(context, "не удалось прочитать тип run entry", source))?
+            .is_dir()
+            && let Some(name) = entry.file_name().to_str()
+            && let Ok(value) = name.parse::<u64>()
+        {
+            ids.push(RunId(value));
+        }
+    }
+    ids.sort_by_key(|id| id.0);
+    Ok(ids)
+}
+
+fn report_inspection_snapshot(
+    reporter: &mut dyn InspectionReporter,
+    value: &str,
+    context: &str,
+) -> Result<(), CommandError> {
+    reporter
+        .snapshot(value)
+        .map_err(|source| CommandError::Runtime {
+            context: format!("{context}: не удалось записать snapshot"),
+            source,
+        })
+}
+
+fn json_formatting_error(source: serde_json::Error) -> CommandError {
+    CommandError::Runtime {
+        context: "run inspection: не удалось сериализовать JSON".to_owned(),
+        source: std::io::Error::other(source),
     }
 }
 
@@ -2305,6 +3118,7 @@ fn report_scheduler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use tempfile::TempDir;
 
     #[test]
@@ -2360,5 +3174,70 @@ mod tests {
             fs::read(&path).expect("previous record must remain readable"),
             b"input: []\nevents: []\n"
         );
+    }
+
+    #[test]
+    fn inspection_retries_snapshot_changed_between_fingerprints() {
+        let root = TempDir::new().expect("test root must be created");
+        let spec_path = root.path().join("spec.yaml");
+        let spec = |workflow: &str| {
+            format!(
+                "workflow-id: {workflow}\nmax-parallel-agents: 1\nsteps:\n- id: first\n  agent:\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: []\n  outputs: []\n"
+            )
+        };
+        fs::write(&spec_path, spec("before")).expect("initial spec must be written");
+        fs::write(
+            root.path().join("0.first.attempt.yaml"),
+            b"input: []\nevents: []\n",
+        )
+        .expect("attempt must be written");
+        let calls = Cell::new(0_usize);
+
+        let run = load_inspected_run_with_hook(root.path(), RunId(1), "test", || {
+            let call = calls.get();
+            calls.set(call + 1);
+            if call == 0 {
+                fs::write(&spec_path, spec("after")).expect("replacement spec must be written");
+            }
+        })
+        .expect("changed snapshot must be retried");
+
+        assert_eq!(run.workflow.workflow_id, "after");
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn inspection_stops_after_bounded_continuous_changes() {
+        let root = TempDir::new().expect("test root must be created");
+        let spec_path = root.path().join("spec.yaml");
+        let spec = |workflow: &str| {
+            format!(
+                "workflow-id: {workflow}\nmax-parallel-agents: 1\nsteps:\n- id: first\n  agent:\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: []\n  outputs: []\n"
+            )
+        };
+        fs::write(&spec_path, spec("even")).expect("initial spec must be written");
+        fs::write(
+            root.path().join("0.first.attempt.yaml"),
+            b"input: []\nevents: []\n",
+        )
+        .expect("attempt must be written");
+        let calls = Cell::new(0_usize);
+
+        let result = load_inspected_run_with_hook(root.path(), RunId(1), "test", || {
+            let call = calls.get() + 1;
+            calls.set(call);
+            let workflow = if call.is_multiple_of(2) {
+                "even"
+            } else {
+                "odd"
+            };
+            fs::write(&spec_path, spec(workflow)).expect("changing spec must be written");
+        });
+        let Err(error) = result else {
+            panic!("continuously changing snapshot must fail");
+        };
+
+        assert!(matches!(error, CommandError::Runtime { .. }));
+        assert_eq!(calls.get(), INSPECTION_SNAPSHOT_ATTEMPTS);
     }
 }

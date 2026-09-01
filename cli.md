@@ -6,9 +6,12 @@
 
 - `orchestrator start [<workflow-id>]` создаёт новый run выбранного workflow.
 - `orchestrator resume <run-id>` продолжает только явно указанный run. Выбор последнего run и другие формы implicit resume не поддерживаются.
-- `orchestrator run list` читает и перечисляет все durable runs без запуска Agent или изменения состояния.
-- `orchestrator run show <run-id>` читает один durable run и показывает его materialized Steps, attempts и вычисленный frontier.
+- `orchestrator run list [--state active|blocked|completed]... [--workflow <workflow-id>] [--format text|json]` читает и перечисляет все durable runs без запуска Agent или изменения состояния.
+- `orchestrator run show <run-id> [--format text|json]` читает один durable run и показывает его materialized Steps, attempts и вычисленный frontier.
+- `orchestrator run artifacts <run-id> [--format text|json]` перечисляет опубликованные версии durable artifacts.
 - `orchestrator run artifact <run-id> <attempt-n> <input-id>` пишет в stdout точные bytes опубликованного artifact выбранного attempt.
+- `orchestrator run watch <run-id> [--format text|json]` наблюдает изменения validated snapshot до terminal state или signal.
+- `orchestrator run verify [<run-id>] [--format text|json]` формирует полный read-only validation report.
 - `orchestrator validate [<workflow-id>]` проверяет workflow без создания или изменения run.
 - `orchestrator config get <key>` читает одно значение конфигурации.
 - `orchestrator config set <key> <value>` атомарно изменяет одно значение.
@@ -145,14 +148,20 @@ Config обязан соответствовать `format.spec.md`. Невал�
 
 - Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не делают run повреждённым и игнорируются по правилам `SPEC.md`.
 
-## `run list`, `run show` и `run artifact`
+## Read-only `run` inspection
 
-- Все три `run`-команды являются read-only: они не получают Run lock, не создают control endpoint, не запускают Agent и не создают или изменяют файлы; занятый supervisor'ом run разрешено читать.
+- Все inspection-команды являются read-only: они не получают Run lock, не создают control endpoint, не запускают Agent и не создают или изменяют файлы; занятый supervisor'ом run разрешено читать.
+- Каждая команда читает fingerprint durable entries до и после полной validation и повторяет изменившийся snapshot максимум четыре раза; стабильное противоречие завершается с `3`, а исчерпание retry при непрерывных изменениях — runtime code `1`, без partial stdout нового snapshot.
 - `run list` игнорирует нечисловые entries в `run/`, проверяет каждый числовой каталог как полную durable-модель и печатает по одной строке в порядке возрастания RunId: `run <run-id>: workflow=<workflow-id> state=<active|blocked|completed>`; отсутствие каталога `run/` или runs является успешным пустым выводом.
+- Повторяемые `--state` объединяются как OR, `--workflow` соединяется со state как AND, одинаковые фильтры идемпотентны, а validation выполняется для всех runs до фильтрации; невалидные state, format или WorkflowId завершаются с `2` до чтения runs.
 - Производное состояние `active` означает наличие незавершённого attempt или непустого ready frontier и не утверждает, что сейчас существует процесс Agent; `completed` означает завершённую модель без нового frontier, остальные валидные состояния являются `blocked`.
 - `run show` первой строкой печатает ту же summary-строку, затем для каждого Step в порядке materialized workflow строку `step <step-id>: attempts=<n,...|->`, затем attempts в порядке глобального номера строками `attempt <n>: step=<step-id> state=<active|completed> session=<session-id|-> input=<n,...|->` и последней строкой `frontier: ready=<step-id,...|-> missing=<step-id,...|->`.
+- `run artifacts` после полной validation печатает completed artifacts в порядке attempt и outputs Step строками `artifact <attempt>: step=<step-id> input=<input-id> bytes=<n> path=<absolute-path>`; orphan, temporary и outputs незавершённых attempts не выводятся, пустой набор успешен.
 - `run artifact` принимает десятичный глобальный attempt number и kebab-case InputId, требует существующий completed attempt и объявленный для его Step output, полностью проверяет durable run до открытия artifact и копирует файл в stdout без текстового преобразования или добавления newline.
-- Неизвестный явно выбранный RunId, attempt или InputId и artifact незавершённого attempt завершаются с `4`; синтаксически невалидный ID или attempt number завершается с `2`; противоречивая durable-модель завершается с `3`; до успешной полной проверки `run list`, `run show` и `run artifact` ничего не пишут в stdout.
+- `--format text` является default и сохраняет описанный text output; JSON schema использует snake_case fields, `run list` и `run artifacts` возвращают arrays, `run show` возвращает object `{run_id,workflow,state,steps,attempts,frontier,artifacts}`, числа остаются numbers, отсутствующая session — `null`, arrays сохраняют deterministic durable order.
+- `run watch` немедленно печатает initial show snapshot, затем проверяет состояние каждые 100 ms и печатает только изменившиеся validated snapshots; text snapshots следуют подряд как show documents, JSON использует по одному compact object на строку, terminal `blocked|completed` завершается с `0`, а signal — с общим кодом `129|130|143`.
+- `run verify` без RunId проверяет все числовые каталоги, с RunId — только выбранный; text содержит `run <id>: valid` либо `run <id>: invalid: <diagnostic>`, JSON имеет форму `{runs:[{run_id,valid,diagnostics}]}`, наличие invalid даёт `3` после полного stdout report, I/O даёт `1`, неизвестный явно выбранный run — `4`.
+- Неизвестный явно выбранный RunId, attempt или InputId и artifact незавершённого attempt завершаются с `4`; синтаксически невалидный ID или attempt number завершается с `2`; противоречивая durable-модель завершается с `3`; до успешной полной проверки `run list`, `run show`, `run artifacts` и `run artifact` ничего не пишут в stdout.
 
 ## `validate`
 

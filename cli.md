@@ -13,8 +13,11 @@
 - `orchestrator run watch <run-id> [--format text|json]` наблюдает изменения validated snapshot до terminal state или signal.
 - `orchestrator run verify [<run-id>] [--format text|json]` формирует полный read-only validation report.
 - `orchestrator workflow list [--format text|json]` перечисляет source workflow templates.
+- `orchestrator workflow show <workflow-id> [--format text|json]` показывает структуру выбранного source workflow template.
 - `orchestrator agent list [--format text|json]` перечисляет named Agents из validated config.
+- `orchestrator agent show <agent-id> [--format text|json]` показывает выбранного named Agent из validated config.
 - `orchestrator prompt list [--format text|json]` перечисляет source prompt templates.
+- `orchestrator prompt show <prompt-id> [--format text|json]` читает выбранный source prompt template.
 - `orchestrator validate [<workflow-id>]` проверяет workflow без создания или изменения run.
 - `orchestrator config get <key>` читает одно значение конфигурации.
 - `orchestrator config set <key> <value>` атомарно изменяет одно значение.
@@ -172,7 +175,10 @@ Config обязан соответствовать `format.spec.md`. Невал�
 - `workflow list` сортирует templates по WorkflowId; text печатает только `<workflow-id>` по одному на строку, JSON — array объектов `{workflow,path}` с абсолютным path; отсутствие `workflow/` успешно и даёт пустой text либо `[]`.
 - `agent list` полностью проверяет `config.yaml` и сортирует named Agents по AgentId; text печатает `agent <id>: type=<type> model=<model> reasoning=<reasoning>`, JSON — array объектов `{agent,type,model,reasoning}`; отсутствие config или пустой `agents` mapping успешно.
 - `prompt list` сортирует templates по PromptId; text печатает `prompt <id>: bytes=<n> path=<absolute-path>`, JSON — array объектов `{prompt,bytes,path}`; `bytes` является JSON number, отсутствие `prompt/` успешно.
-- Невалидный basename contract file, non-regular template, non-UTF-8 prompt или невалидный config завершается с `3` без partial stdout; другие расширения и начинающиеся с `.` временные entries игнорируются, неизвестный format отклоняется CLI с `2` до чтения state root.
+- `workflow show` text печатает header `workflow <id>: path=<absolute-path>`, затем Steps в source order строками `step <id>: agent=<id|-> prompt=<id|-> human=<true|false> depends-on=<id,...|-> outputs=<id,...|->`; JSON возвращает object `{workflow,path,steps}`, где Step содержит `{id,agent,prompt,human,depends_on,outputs}`, отсутствующие optional references равны `null`, а source references не разрешаются через config, prompts или graph.
+- `agent show` выполняет полную config validation и затем выбирает Agent; text печатает `agent <id>: type=<type> model=<model> reasoning=<reasoning>`, JSON возвращает object `{agent,type,model,reasoning}`.
+- `prompt show` text побайтово равен UTF-8 содержимому выбранного template без добавления newline, JSON возвращает object `{prompt,bytes,path,content}` с числовым `bytes` и точным `content`; команда не читает соседние templates.
+- Невалидный basename contract file для list, non-regular выбранный или перечисляемый template, non-UTF-8 прочитанный prompt, невалидный source workflow либо невалидный config завершается с `3` без partial stdout; неизвестный явно выбранный source ID даёт `4`, синтаксически невалидный ID или format отклоняется с `2` до чтения source; другие расширения и начинающиеся с `.` временные entries list-команд игнорируются.
 
 ## `validate`
 

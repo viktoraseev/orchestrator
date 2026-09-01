@@ -15,10 +15,11 @@ use orchestrator::{
     AgentSessionObserver, CommandError, ConfigCommand, ConfigKey, InspectionFormat,
     InspectionReporter, LifecycleCommand, LifecycleReporter, LifecycleSignals,
     ProcessAgentRegistry, ProcessEnvironment, RunId, RunInspectionState, TerminalMode,
-    TerminationSignal, ValidateCommand, execute_agent_list, execute_config, execute_lifecycle,
-    execute_prompt_list, execute_run_artifacts, execute_run_list_formatted,
-    execute_run_show_formatted, execute_run_verify, execute_run_watch, execute_validate,
-    execute_workflow_list, open_run_artifact, send_attempt_completion, send_session_activation,
+    TerminationSignal, ValidateCommand, execute_agent_list, execute_agent_show, execute_config,
+    execute_lifecycle, execute_prompt_list, execute_prompt_show, execute_run_artifacts,
+    execute_run_list_formatted, execute_run_show_formatted, execute_run_verify, execute_run_watch,
+    execute_validate, execute_workflow_list, execute_workflow_show, open_run_artifact,
+    send_attempt_completion, send_session_activation,
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -71,9 +72,14 @@ enum TopLevelCommand {
     },
 }
 
-#[derive(Clone, Copy, Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum CatalogCliCommand {
     List {
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
+    },
+    Show {
+        source_id: String,
         #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
         format: InspectionFormatArgument,
     },
@@ -310,6 +316,7 @@ fn main() -> ExitCode {
     };
     match dispatch(cli.command, &environment) {
         Ok(CommandOutput::Text(output)) => write_text_output(&output),
+        Ok(CommandOutput::ExactText(output)) => write_exact_text_output(&output),
         Ok(CommandOutput::TextWithCode(output, code)) => {
             let written = write_text_output(&output);
             if written == ExitCode::SUCCESS {
@@ -330,8 +337,23 @@ fn main() -> ExitCode {
 enum CommandOutput {
     None,
     Text(String),
+    ExactText(String),
     TextWithCode(String, u8),
     Artifact(File),
+}
+
+fn write_exact_text_output(output: &str) -> ExitCode {
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(output.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: output: {error}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn write_text_output(output: &str) -> ExitCode {
@@ -434,13 +456,28 @@ fn dispatch_catalog(
     command: CatalogCliCommand,
     environment: &ProcessEnvironment,
 ) -> Result<CommandOutput, CommandError> {
-    let CatalogCliCommand::List { format } = command;
-    match kind {
-        CatalogKind::Workflow => execute_workflow_list(environment, format.into()),
-        CatalogKind::Agent => execute_agent_list(environment, format.into()),
-        CatalogKind::Prompt => execute_prompt_list(environment, format.into()),
+    match command {
+        CatalogCliCommand::List { format } => match kind {
+            CatalogKind::Workflow => execute_workflow_list(environment, format.into()),
+            CatalogKind::Agent => execute_agent_list(environment, format.into()),
+            CatalogKind::Prompt => execute_prompt_list(environment, format.into()),
+        }
+        .map(CommandOutput::Text),
+        CatalogCliCommand::Show { source_id, format } => match kind {
+            CatalogKind::Workflow => execute_workflow_show(&source_id, environment, format.into())
+                .map(CommandOutput::Text),
+            CatalogKind::Agent => {
+                execute_agent_show(&source_id, environment, format.into()).map(CommandOutput::Text)
+            }
+            CatalogKind::Prompt => {
+                let output = execute_prompt_show(&source_id, environment, format.into())?;
+                Ok(match format {
+                    InspectionFormatArgument::Text => CommandOutput::ExactText(output),
+                    InspectionFormatArgument::Json => CommandOutput::Text(output),
+                })
+            }
+        },
     }
-    .map(CommandOutput::Text)
 }
 
 fn dispatch_run(

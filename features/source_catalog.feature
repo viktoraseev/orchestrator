@@ -71,3 +71,124 @@ Feature: Read-only catalogs source definitions
       When запускается orchestrator prompt list
       Then catalog завершается с кодом 3
       And catalog output пуст
+
+  @spec:source-catalogs @format:workflow-yaml @format:идентификаторы-и-номера @cli:source-catalogs
+  Rule: Workflow show читает source structure без materialization
+
+    Scenario: Typed source workflow сохраняет неразрешённые references и порядок Steps
+      Given подготовлен source workflow demo с несуществующими Agent и prompt references
+      When workflow demo читается через публичный API
+      Then catalog завершается с кодом 0
+      And typed source workflow содержит исходные Steps и references
+      And catalog не изменил source state
+
+    @process
+    Scenario: Workflow show JSON возвращает один typed object
+      Given подготовлен source workflow demo с несуществующими Agent и prompt references
+      When запускается orchestrator workflow show demo в JSON
+      Then catalog завершается с кодом 0
+      And JSON workflow show содержит абсолютный path и Steps в source order
+
+    @process
+    Scenario: Workflow show text показывает source fields в порядке Steps
+      Given подготовлен source workflow demo с несуществующими Agent и prompt references
+      When запускается orchestrator workflow show demo
+      Then catalog завершается с кодом 0
+      And workflow show text содержит header и обе source Step строки
+
+    @process
+    Scenario: Невалидная schema выбранного workflow не даёт stdout
+      Given подготовлен source workflow demo с пустым списком Steps
+      When запускается orchestrator workflow show demo
+      Then catalog завершается с кодом 3
+      And catalog output пуст
+
+    @process
+    Scenario: Неизвестный workflow возвращает not found
+      Given подготовлен пустой source catalog root
+      When запускается orchestrator workflow show missing
+      Then catalog завершается с кодом 4
+      And catalog output пуст
+
+  @spec:source-catalogs @format:config-yaml @format:идентификаторы-и-номера @cli:source-catalogs
+  Rule: Agent show выбирает Agent только после полной config validation
+
+    Scenario: Typed Agent show возвращает выбранную validated запись
+      Given подготовлен config с Agents beta и alpha
+      When Agent alpha читается через публичный API
+      Then catalog завершается с кодом 0
+      And typed Agent show содержит alpha
+
+    @process
+    Scenario: Agent show JSON возвращает один object
+      Given подготовлен config с Agents beta и alpha
+      When запускается orchestrator agent show beta в JSON
+      Then catalog завершается с кодом 0
+      And JSON Agent show содержит beta
+      And catalog не изменил source state
+
+    @process
+    Scenario: Agent show text имеет стабильную форму
+      Given подготовлен config с Agents beta и alpha
+      When запускается orchestrator agent show alpha
+      Then catalog завершается с кодом 0
+      And Agent show text содержит выбранную запись
+
+    @process
+    Scenario: Невалидный AgentId отклоняется до чтения повреждённого config
+      Given подготовлен невалидный config для Agent catalog
+      When запускается orchestrator agent show с невалидным ID
+      Then catalog завершается с кодом 2
+      And catalog output пуст
+
+    @process
+    Scenario: Повреждение config не даёт partial stdout Agent show
+      Given подготовлен невалидный config для Agent catalog
+      When запускается orchestrator agent show alpha
+      Then catalog завершается с кодом 3
+      And catalog output пуст
+
+    @process
+    Scenario: Неизвестный Agent возвращает not found
+      Given подготовлен config с Agents beta и alpha
+      When запускается orchestrator agent show missing
+      Then catalog завершается с кодом 4
+      And catalog output пуст
+
+  @spec:source-catalogs @format:prompt-template @format:идентификаторы-и-номера @cli:source-catalogs
+  Rule: Prompt show читает только выбранный template и сохраняет точные bytes
+
+    Scenario: Typed prompt show возвращает content и размер выбранного template
+      Given подготовлен prompt demo без финального newline и повреждённый соседний template
+      When prompt demo читается через публичный API
+      Then catalog завершается с кодом 0
+      And typed prompt show содержит точное содержимое demo
+      And catalog не изменил source state
+
+    @process
+    Scenario: Prompt show text не добавляет финальный newline
+      Given подготовлен prompt demo без финального newline и повреждённый соседний template
+      When запускается orchestrator prompt show demo
+      Then catalog завершается с кодом 0
+      And prompt show stdout побайтово равен template без newline
+
+    @process
+    Scenario: Prompt show JSON сохраняет content и числовой bytes
+      Given подготовлен prompt demo с финальным newline
+      When запускается orchestrator prompt show demo в JSON
+      Then catalog завершается с кодом 0
+      And JSON prompt show содержит точный content и bytes
+
+    @process
+    Scenario: Выбранный non-UTF-8 prompt не даёт partial stdout
+      Given подготовлен non-UTF-8 prompt template
+      When запускается orchestrator prompt show binary
+      Then catalog завершается с кодом 3
+      And catalog output пуст
+
+    @process
+    Scenario: Неизвестный prompt возвращает not found
+      Given подготовлен пустой source catalog root
+      When запускается orchestrator prompt show missing
+      Then catalog завершается с кодом 4
+      And catalog output пуст

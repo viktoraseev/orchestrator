@@ -1,8 +1,8 @@
 ---
 id: orc-x9n0
-status: open
-deps: []
-links: []
+status: closed
+deps: [orc-ltal]
+links: [orc-z4o4, orc-fw88]
 created: 2026-09-01T13:56:11Z
 type: feature
 priority: 2
@@ -21,3 +21,9 @@ tags: [prompt, catalog, show, cli, read-only, json]
 
 Text stdout побайтово равен UTF-8 template, включая наличие или отсутствие финального newline; JSON возвращает один object с числовым bytes и точным content; неизвестный prompt возвращает 4, невалидный ID/format — 2, non-regular или non-UTF-8 — 3 без partial stdout; посторонние templates не читаются и не могут маскировать выбранный valid prompt, операция read-only; cli.md, format.spec.md и source-tagged API/process acceptance обновлены; canonical checks проходят.
 
+
+## Notes
+
+**2026-09-01T14:06:33Z**
+
+Реализованы публичный API и CLI prompt show с чтением только выбранного UTF-8 template, точным text stdout без добавления newline, JSON descriptor и source-tagged acceptance; ./scripts/test.sh и ./scripts/build.sh проходят.

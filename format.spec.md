@@ -22,6 +22,7 @@ run/<run-id>/<n>.<step-id>.<input-id>.artifact
 - `active.lock` является файлом для kernel lock; его содержимое не имеет контракта.
 - Volatile control socket, временные файлы атомарной записи и временные файлы artifacts не входят в durable layout.
 - Source catalogs игнорируют entries с другими расширениями и имена, начинающиеся с `.`, но каждый не временный `workflow/*.yaml` и `prompt/*.md` считается contract file и обязан иметь валидный ID в basename и быть regular file.
+- Show-команды строят выбранный путь только из предварительно проверенного symbolic ID и соответствующего фиксированного layout `workflow/<workflow-id>.yaml` либо `prompt/<prompt-id>.md`, не перечисляя соседние entries.
 
 ## Идентификаторы и номера
 
@@ -107,6 +108,8 @@ steps:
 - Если artifact для `content` не является UTF-8, prompt нельзя сформировать и текущая команда завершается fail-fast до запуска агента.
 - Prompt template первого описанного Step не может содержать placeholders любого вида.
 - Prompt catalog вычисляет `bytes` из полностью прочитанного UTF-8 содержимого файла, поэтому значение равно размеру template в bytes, а не числу Unicode symbols.
+- Workflow show требует source YAML schema с непустым `steps`, уникальными валидными StepId, валидными необязательными AgentId и PromptId, валидными и уникальными значениями `depends-on` и `outputs`, но не требует существования referenced Steps, Agents, prompts или artifacts.
+- Prompt show вычисляет `bytes` по точному UTF-8 содержимому выбранного template и сохраняет `content` вместе с наличием или отсутствием финального newline.
 
 ## Materialized workflow
 

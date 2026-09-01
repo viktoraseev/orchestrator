@@ -1,5 +1,6 @@
 //! Read-only catalogs source workflows, named Agents и prompt templates; модуль не materialize'ит workflows и не изменяет state root.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use serde::Serialize;
 use crate::agent::BuiltinAgentRegistry;
 use crate::config::{CommandError, ProcessEnvironment, read_config, resolve_state_root};
 use crate::run::InspectionFormat;
-use crate::workflow::SymbolicId;
+use crate::workflow::{RawStep, RawWorkflow, SymbolicId};
 
 /// Descriptor source workflow template.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -30,6 +31,85 @@ impl WorkflowCatalogEntry {
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
+    }
+}
+
+/// Typed source workflow до materialization config и prompt templates.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct SourceWorkflow {
+    workflow: String,
+    path: String,
+    steps: Vec<SourceWorkflowStep>,
+}
+
+impl SourceWorkflow {
+    /// Возвращает validated `WorkflowId`.
+    #[must_use]
+    pub fn workflow(&self) -> &str {
+        &self.workflow
+    }
+
+    /// Возвращает абсолютный path source template.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Возвращает Steps в исходном YAML order.
+    #[must_use]
+    pub fn steps(&self) -> &[SourceWorkflowStep] {
+        &self.steps
+    }
+}
+
+/// Source Step без разрешения Agent и prompt references.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct SourceWorkflowStep {
+    id: String,
+    agent: Option<String>,
+    prompt: Option<String>,
+    human: bool,
+    depends_on: Vec<String>,
+    outputs: Vec<String>,
+}
+
+impl SourceWorkflowStep {
+    /// Возвращает validated `StepId`.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Возвращает явный source `AgentId`, не применяя default.
+    #[must_use]
+    pub fn agent(&self) -> Option<&str> {
+        self.agent.as_deref()
+    }
+
+    /// Возвращает source `PromptId`.
+    #[must_use]
+    pub fn prompt(&self) -> Option<&str> {
+        self.prompt.as_deref()
+    }
+
+    /// Возвращает source human flag.
+    #[must_use]
+    pub const fn is_human(&self) -> bool {
+        self.human
+    }
+
+    /// Возвращает source dependencies в исходном order.
+    #[must_use]
+    pub fn depends_on(&self) -> &[String] {
+        &self.depends_on
+    }
+
+    /// Возвращает source outputs в исходном order.
+    #[must_use]
+    pub fn outputs(&self) -> &[String] {
+        &self.outputs
     }
 }
 
@@ -99,6 +179,42 @@ impl PromptCatalogEntry {
     }
 }
 
+/// Полностью прочитанный UTF-8 prompt template.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct PromptTemplate {
+    prompt: String,
+    bytes: u64,
+    path: String,
+    content: String,
+}
+
+impl PromptTemplate {
+    /// Возвращает validated `PromptId`.
+    #[must_use]
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    /// Возвращает размер content в UTF-8 bytes.
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Возвращает абсолютный path template.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Возвращает точное UTF-8 содержимое template.
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+}
+
 /// Строит typed catalog source workflow templates без чтения их содержимого или config.
 ///
 /// # Errors
@@ -132,6 +248,54 @@ pub fn execute_workflow_list(
     match format {
         InspectionFormat::Text => render_lines(entries.iter().map(|entry| entry.workflow.as_str())),
         InspectionFormat::Json => render_json(&entries, "workflow list"),
+    }
+}
+
+/// Читает и структурно проверяет один source workflow без materialization и graph validation.
+///
+/// # Errors
+///
+/// Возвращает `2` для невалидного `WorkflowId`, `4` для отсутствующего template, `3` для non-regular, non-UTF-8 или невалидного YAML/schema и runtime error для I/O.
+pub fn show_workflow(
+    workflow_id: &str,
+    environment: &ProcessEnvironment,
+) -> Result<SourceWorkflow, CommandError> {
+    let workflow = parse_selected_id(workflow_id, "WorkflowId", "workflow show")?;
+    let root = resolve_state_root(environment, "workflow show")?;
+    let path = selected_catalog_path(&root, "workflow", "yaml", &workflow, "workflow show")?;
+    let bytes = fs::read(&path).map_err(|source| CommandError::Runtime {
+        context: format!("workflow show: не удалось прочитать {}", path.display()),
+        source,
+    })?;
+    std::str::from_utf8(&bytes).map_err(|_| CommandError::Invalid {
+        context: format!("workflow show: workflow '{workflow}' не является UTF-8"),
+    })?;
+    let raw: RawWorkflow =
+        serde_yaml::from_slice(&bytes).map_err(|source| CommandError::Invalid {
+            context: format!("workflow show: невалидный workflow '{workflow}': {source}"),
+        })?;
+    let steps = validate_source_steps(&workflow, raw.steps)?;
+    Ok(SourceWorkflow {
+        workflow,
+        path: catalog_path_string(&path, "workflow show")?,
+        steps,
+    })
+}
+
+/// Рендерит один source workflow в text или JSON.
+///
+/// # Errors
+///
+/// Возвращает ошибки [`show_workflow`] либо serialization.
+pub fn execute_workflow_show(
+    workflow_id: &str,
+    environment: &ProcessEnvironment,
+    format: InspectionFormat,
+) -> Result<String, CommandError> {
+    let workflow = show_workflow(workflow_id, environment)?;
+    match format {
+        InspectionFormat::Text => render_source_workflow(&workflow),
+        InspectionFormat::Json => render_json(&workflow, "workflow show"),
     }
 }
 
@@ -169,13 +333,52 @@ pub fn execute_agent_list(
 ) -> Result<String, CommandError> {
     let entries = list_agents(environment)?;
     match format {
-        InspectionFormat::Text => render_lines(entries.iter().map(|entry| {
-            format!(
-                "agent {}: type={} model={} reasoning={}",
-                entry.agent, entry.agent_type, entry.model, entry.reasoning
-            )
-        })),
+        InspectionFormat::Text => render_lines(entries.iter().map(render_agent)),
         InspectionFormat::Json => render_json(&entries, "agent list"),
+    }
+}
+
+/// Выбирает одного named Agent после полной validation config.
+///
+/// # Errors
+///
+/// Возвращает `2` для невалидного `AgentId`, `4` для отсутствующего Agent и ошибки полной config/Agent validation.
+pub fn show_agent(
+    agent_id: &str,
+    environment: &ProcessEnvironment,
+) -> Result<AgentCatalogEntry, CommandError> {
+    let agent = parse_selected_id(agent_id, "AgentId", "agent show")?;
+    let root = resolve_state_root(environment, "agent show")?;
+    let document = read_config(&root, "agent show", &BuiltinAgentRegistry)?;
+    let value = document
+        .raw
+        .agents
+        .get(&agent)
+        .ok_or_else(|| CommandError::NotFound {
+            context: format!("agent show: Agent '{agent}' не существует"),
+        })?;
+    Ok(AgentCatalogEntry {
+        agent,
+        agent_type: value.r#type.clone(),
+        model: value.model.clone(),
+        reasoning: value.reasoning.clone(),
+    })
+}
+
+/// Рендерит одного named Agent в text или JSON.
+///
+/// # Errors
+///
+/// Возвращает ошибки [`show_agent`] либо serialization.
+pub fn execute_agent_show(
+    agent_id: &str,
+    environment: &ProcessEnvironment,
+    format: InspectionFormat,
+) -> Result<String, CommandError> {
+    let agent = show_agent(agent_id, environment)?;
+    match format {
+        InspectionFormat::Text => Ok(render_agent(&agent)),
+        InspectionFormat::Json => render_json(&agent, "agent show"),
     }
 }
 
@@ -228,6 +431,219 @@ pub fn execute_prompt_list(
             )
         })),
         InspectionFormat::Json => render_json(&entries, "prompt list"),
+    }
+}
+
+/// Читает один source prompt template целиком.
+///
+/// # Errors
+///
+/// Возвращает `2` для невалидного `PromptId`, `4` для отсутствующего template, `3` для non-regular или non-UTF-8 файла и runtime error для I/O.
+pub fn show_prompt(
+    prompt_id: &str,
+    environment: &ProcessEnvironment,
+) -> Result<PromptTemplate, CommandError> {
+    let prompt = parse_selected_id(prompt_id, "PromptId", "prompt show")?;
+    let root = resolve_state_root(environment, "prompt show")?;
+    let path = selected_catalog_path(&root, "prompt", "md", &prompt, "prompt show")?;
+    let bytes = fs::read(&path).map_err(|source| CommandError::Runtime {
+        context: format!("prompt show: не удалось прочитать {}", path.display()),
+        source,
+    })?;
+    let byte_count = u64::try_from(bytes.len()).map_err(|source| CommandError::Runtime {
+        context: "prompt show: размер template не помещается в u64".to_owned(),
+        source: std::io::Error::other(source),
+    })?;
+    let content = String::from_utf8(bytes).map_err(|_| CommandError::Invalid {
+        context: format!("prompt show: Prompt '{prompt}' не является UTF-8"),
+    })?;
+    Ok(PromptTemplate {
+        prompt,
+        bytes: byte_count,
+        path: catalog_path_string(&path, "prompt show")?,
+        content,
+    })
+}
+
+/// Рендерит один prompt template как точный text content или JSON descriptor.
+///
+/// # Errors
+///
+/// Возвращает ошибки [`show_prompt`] либо serialization.
+pub fn execute_prompt_show(
+    prompt_id: &str,
+    environment: &ProcessEnvironment,
+    format: InspectionFormat,
+) -> Result<String, CommandError> {
+    let prompt = show_prompt(prompt_id, environment)?;
+    match format {
+        InspectionFormat::Text => Ok(prompt.content),
+        InspectionFormat::Json => render_json(&prompt, "prompt show"),
+    }
+}
+
+fn validate_source_steps(
+    workflow: &str,
+    raw_steps: Vec<RawStep>,
+) -> Result<Vec<SourceWorkflowStep>, CommandError> {
+    if raw_steps.is_empty() {
+        return Err(invalid_source_workflow(
+            workflow,
+            "steps должен быть непустым",
+        ));
+    }
+    let mut step_ids = HashSet::with_capacity(raw_steps.len());
+    let mut steps = Vec::with_capacity(raw_steps.len());
+    for (index, raw) in raw_steps.into_iter().enumerate() {
+        let id = parse_source_id(workflow, index, "StepId", &raw.id)?;
+        if !step_ids.insert(id.clone()) {
+            return Err(invalid_source_step(workflow, &id, "StepId повторяется"));
+        }
+        let agent = raw
+            .agent
+            .map(|value| parse_source_id(workflow, index, "AgentId", &value))
+            .transpose()?;
+        let prompt = raw
+            .prompt
+            .map(|value| parse_source_id(workflow, index, "PromptId", &value))
+            .transpose()?;
+        let depends_on =
+            parse_source_ids(workflow, index, &id, "depends-on", "StepId", raw.depends_on)?;
+        let outputs = parse_source_ids(workflow, index, &id, "outputs", "InputId", raw.outputs)?;
+        steps.push(SourceWorkflowStep {
+            id,
+            agent,
+            prompt,
+            human: raw.human,
+            depends_on,
+            outputs,
+        });
+    }
+    Ok(steps)
+}
+
+fn parse_source_ids(
+    workflow: &str,
+    index: usize,
+    step_id: &str,
+    field: &str,
+    kind: &str,
+    values: Vec<String>,
+) -> Result<Vec<String>, CommandError> {
+    let mut unique = HashSet::with_capacity(values.len());
+    let mut parsed = Vec::with_capacity(values.len());
+    for value in values {
+        let value = parse_source_id(workflow, index, kind, &value)?;
+        if !unique.insert(value.clone()) {
+            return Err(invalid_source_step(
+                workflow,
+                step_id,
+                &format!("{field} содержит повтор '{value}'"),
+            ));
+        }
+        parsed.push(value);
+    }
+    Ok(parsed)
+}
+
+fn parse_source_id(
+    workflow: &str,
+    index: usize,
+    kind: &str,
+    value: &str,
+) -> Result<String, CommandError> {
+    SymbolicId::parse(kind, value)
+        .map(SymbolicId::into_string)
+        .map_err(|message| invalid_source_workflow(workflow, &format!("Step #{index}: {message}")))
+}
+
+fn invalid_source_workflow(workflow: &str, message: &str) -> CommandError {
+    CommandError::Invalid {
+        context: format!("workflow show: workflow '{workflow}': {message}"),
+    }
+}
+
+fn invalid_source_step(workflow: &str, step_id: &str, message: &str) -> CommandError {
+    invalid_source_workflow(workflow, &format!("Step '{step_id}': {message}"))
+}
+
+fn parse_selected_id(value: &str, kind: &str, context: &str) -> Result<String, CommandError> {
+    SymbolicId::parse(kind, value)
+        .map(SymbolicId::into_string)
+        .map_err(|message| CommandError::Syntax {
+            context: format!("{context}: {message}"),
+        })
+}
+
+fn selected_catalog_path(
+    root: &Path,
+    directory: &str,
+    extension: &str,
+    id: &str,
+    context: &str,
+) -> Result<PathBuf, CommandError> {
+    let path = root.join(directory).join(format!("{id}.{extension}"));
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(path),
+        Ok(_) => Err(CommandError::Invalid {
+            context: format!("{context}: {} не является regular file", path.display()),
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            Err(CommandError::NotFound {
+                context: format!("{context}: '{id}' не существует"),
+            })
+        }
+        Err(source) => Err(CommandError::Runtime {
+            context: format!("{context}: не удалось проверить {}", path.display()),
+            source,
+        }),
+    }
+}
+
+fn render_source_workflow(workflow: &SourceWorkflow) -> Result<String, CommandError> {
+    let mut output = String::new();
+    writeln!(
+        output,
+        "workflow {}: path={}",
+        workflow.workflow, workflow.path
+    )
+    .map_err(text_format_error)?;
+    for step in &workflow.steps {
+        writeln!(
+            output,
+            "step {}: agent={} prompt={} human={} depends-on={} outputs={}",
+            step.id,
+            step.agent.as_deref().unwrap_or("-"),
+            step.prompt.as_deref().unwrap_or("-"),
+            step.human,
+            joined_or_dash(&step.depends_on),
+            joined_or_dash(&step.outputs)
+        )
+        .map_err(text_format_error)?;
+    }
+    output.pop();
+    Ok(output)
+}
+
+fn render_agent(agent: &AgentCatalogEntry) -> String {
+    format!(
+        "agent {}: type={} model={} reasoning={}",
+        agent.agent, agent.agent_type, agent.model, agent.reasoning
+    )
+}
+
+fn joined_or_dash(values: &[String]) -> String {
+    if values.is_empty() {
+        "-".to_owned()
+    } else {
+        values.join(",")
+    }
+}
+
+fn text_format_error(source: std::fmt::Error) -> CommandError {
+    CommandError::Runtime {
+        context: "source catalog: не удалось сформировать text output".to_owned(),
+        source: std::io::Error::other(source),
     }
 }
 

@@ -85,19 +85,19 @@ impl SymbolicId {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawWorkflow {
-    steps: Vec<RawStep>,
+pub(crate) struct RawWorkflow {
+    pub(crate) steps: Vec<RawStep>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
-struct RawStep {
-    id: String,
-    agent: Option<String>,
-    prompt: Option<String>,
-    human: bool,
-    depends_on: Vec<String>,
-    outputs: Vec<String>,
+pub(crate) struct RawStep {
+    pub(crate) id: String,
+    pub(crate) agent: Option<String>,
+    pub(crate) prompt: Option<String>,
+    pub(crate) human: bool,
+    pub(crate) depends_on: Vec<String>,
+    pub(crate) outputs: Vec<String>,
 }
 
 #[derive(Clone, Debug)]

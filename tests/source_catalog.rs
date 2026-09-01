@@ -6,8 +6,9 @@ use std::process::Command;
 
 use cucumber::{World, given, then, when};
 use orchestrator::{
-    AgentCatalogEntry, InspectionFormat, ProcessEnvironment, PromptCatalogEntry,
-    execute_workflow_list, list_agents, list_prompts,
+    AgentCatalogEntry, InspectionFormat, ProcessEnvironment, PromptCatalogEntry, PromptTemplate,
+    SourceWorkflow, execute_workflow_list, list_agents, list_prompts, show_agent, show_prompt,
+    show_workflow,
 };
 use tempfile::TempDir;
 
@@ -18,6 +19,9 @@ struct CatalogWorld {
     initial_state: Vec<(PathBuf, Vec<u8>)>,
     agents: Vec<AgentCatalogEntry>,
     prompts: Vec<PromptCatalogEntry>,
+    shown_workflow: Option<SourceWorkflow>,
+    shown_agent: Option<AgentCatalogEntry>,
+    shown_prompt: Option<PromptTemplate>,
 }
 
 #[derive(Debug)]
@@ -94,6 +98,43 @@ fn non_utf8_prompt(world: &mut CatalogWorld) {
     fs::write(directory.join("binary.md"), [0xff, 0xfe]).expect("prompt must be written");
 }
 
+#[given("подготовлен source workflow demo с несуществующими Agent и prompt references")]
+fn source_workflow_with_unresolved_references(world: &mut CatalogWorld) {
+    empty_root(world);
+    let directory = world.root().join("workflow");
+    fs::create_dir(&directory).expect("workflow directory must be created");
+    fs::write(
+        directory.join("demo.yaml"),
+        b"steps:\n  - id: plan\n    agent: missing-agent\n    prompt: missing-prompt\n    human: false\n    depends-on: []\n    outputs: [brief]\n  - id: write\n    agent: missing-writer\n    prompt: missing-draft\n    human: true\n    depends-on: [ghost-step]\n    outputs: [article]\n",
+    )
+    .expect("workflow must be written");
+}
+
+#[given("подготовлен source workflow demo с пустым списком Steps")]
+fn source_workflow_with_empty_steps(world: &mut CatalogWorld) {
+    empty_root(world);
+    let directory = world.root().join("workflow");
+    fs::create_dir(&directory).expect("workflow directory must be created");
+    fs::write(directory.join("demo.yaml"), b"steps: []\n").expect("workflow must be written");
+}
+
+#[given("подготовлен prompt demo без финального newline и повреждённый соседний template")]
+fn selected_prompt_without_newline(world: &mut CatalogWorld) {
+    empty_root(world);
+    let directory = world.root().join("prompt");
+    fs::create_dir(&directory).expect("prompt directory must be created");
+    fs::write(directory.join("demo.md"), "точный prompt").expect("prompt must be written");
+    fs::write(directory.join("broken.md"), [0xff]).expect("neighbor must be written");
+}
+
+#[given("подготовлен prompt demo с финальным newline")]
+fn selected_prompt_with_newline(world: &mut CatalogWorld) {
+    empty_root(world);
+    let directory = world.root().join("prompt");
+    fs::create_dir(&directory).expect("prompt directory must be created");
+    fs::write(directory.join("demo.md"), "строка\n").expect("prompt must be written");
+}
+
 #[when("workflow catalog строится через публичный API")]
 fn workflow_catalog_api(world: &mut CatalogWorld) {
     world.capture_state();
@@ -121,6 +162,42 @@ fn prompt_catalog_api(world: &mut CatalogWorld) {
     match list_prompts(&environment(world.root())) {
         Ok(entries) => {
             world.prompts = entries;
+            world.observed = Some(success());
+        }
+        Err(error) => world.observed = Some(failure(&error)),
+    }
+}
+
+#[when("workflow demo читается через публичный API")]
+fn workflow_show_api(world: &mut CatalogWorld) {
+    world.capture_state();
+    match show_workflow("demo", &environment(world.root())) {
+        Ok(workflow) => {
+            world.shown_workflow = Some(workflow);
+            world.observed = Some(success());
+        }
+        Err(error) => world.observed = Some(failure(&error)),
+    }
+}
+
+#[when("Agent alpha читается через публичный API")]
+fn agent_show_api(world: &mut CatalogWorld) {
+    world.capture_state();
+    match show_agent("alpha", &environment(world.root())) {
+        Ok(agent) => {
+            world.shown_agent = Some(agent);
+            world.observed = Some(success());
+        }
+        Err(error) => world.observed = Some(failure(&error)),
+    }
+}
+
+#[when("prompt demo читается через публичный API")]
+fn prompt_show_api(world: &mut CatalogWorld) {
+    world.capture_state();
+    match show_prompt("demo", &environment(world.root())) {
+        Ok(prompt) => {
+            world.shown_prompt = Some(prompt);
             world.observed = Some(success());
         }
         Err(error) => world.observed = Some(failure(&error)),
@@ -155,6 +232,61 @@ fn prompt_json_cli(world: &mut CatalogWorld) {
 #[when("запускается orchestrator prompt list")]
 fn prompt_text_cli(world: &mut CatalogWorld) {
     run_cli(world, &["prompt", "list"]);
+}
+
+#[when("запускается orchestrator workflow show demo в JSON")]
+fn workflow_show_json_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["workflow", "show", "demo", "--format", "json"]);
+}
+
+#[when("запускается orchestrator workflow show demo")]
+fn workflow_show_text_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["workflow", "show", "demo"]);
+}
+
+#[when("запускается orchestrator workflow show missing")]
+fn missing_workflow_show_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["workflow", "show", "missing"]);
+}
+
+#[when("запускается orchestrator agent show beta в JSON")]
+fn agent_show_json_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["agent", "show", "beta", "--format", "json"]);
+}
+
+#[when("запускается orchestrator agent show alpha")]
+fn agent_show_text_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["agent", "show", "alpha"]);
+}
+
+#[when("запускается orchestrator agent show с невалидным ID")]
+fn invalid_agent_show_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["agent", "show", "Bad-ID"]);
+}
+
+#[when("запускается orchestrator agent show missing")]
+fn missing_agent_show_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["agent", "show", "missing"]);
+}
+
+#[when("запускается orchestrator prompt show demo")]
+fn prompt_show_text_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["prompt", "show", "demo"]);
+}
+
+#[when("запускается orchestrator prompt show demo в JSON")]
+fn prompt_show_json_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["prompt", "show", "demo", "--format", "json"]);
+}
+
+#[when("запускается orchestrator prompt show missing")]
+fn missing_prompt_show_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["prompt", "show", "missing"]);
+}
+
+#[when("запускается orchestrator prompt show binary")]
+fn non_utf8_prompt_show_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["prompt", "show", "binary"]);
 }
 
 #[then(expr = "catalog завершается с кодом {int}")]
@@ -206,6 +338,101 @@ fn prompt_json_sorted(world: &mut CatalogWorld) {
     assert_eq!(value[0]["bytes"], 10);
     assert_eq!(value[1]["prompt"], "beta");
     assert_eq!(value.as_array().map(Vec::len), Some(2));
+}
+
+#[then("typed source workflow содержит исходные Steps и references")]
+fn typed_source_workflow(world: &mut CatalogWorld) {
+    let workflow = world
+        .shown_workflow
+        .as_ref()
+        .expect("workflow show must succeed");
+    assert_eq!(workflow.workflow(), "demo");
+    assert!(Path::new(workflow.path()).is_absolute());
+    assert_eq!(workflow.steps()[0].id(), "plan");
+    assert_eq!(workflow.steps()[0].agent(), Some("missing-agent"));
+    assert_eq!(workflow.steps()[0].prompt(), Some("missing-prompt"));
+    assert_eq!(workflow.steps()[0].outputs(), ["brief"]);
+    assert_eq!(workflow.steps()[1].id(), "write");
+    assert!(workflow.steps()[1].is_human());
+    assert_eq!(workflow.steps()[1].depends_on(), ["ghost-step"]);
+}
+
+#[then("JSON workflow show содержит абсолютный path и Steps в source order")]
+fn workflow_show_json(world: &mut CatalogWorld) {
+    let value = world.json();
+    assert_eq!(value["workflow"], "demo");
+    assert!(Path::new(value["path"].as_str().expect("path must be a string")).is_absolute());
+    assert_eq!(value["steps"][0]["id"], "plan");
+    assert_eq!(value["steps"][0]["agent"], "missing-agent");
+    assert_eq!(value["steps"][1]["id"], "write");
+    assert_eq!(value["steps"][1]["depends_on"][0], "ghost-step");
+}
+
+#[then("workflow show text содержит header и обе source Step строки")]
+fn workflow_show_text(world: &mut CatalogWorld) {
+    let lines = world.stdout().lines().collect::<Vec<_>>();
+    assert!(lines[0].starts_with("workflow demo: path=/"));
+    assert_eq!(
+        lines[1],
+        "step plan: agent=missing-agent prompt=missing-prompt human=false depends-on=- outputs=brief"
+    );
+    assert_eq!(
+        lines[2],
+        "step write: agent=missing-writer prompt=missing-draft human=true depends-on=ghost-step outputs=article"
+    );
+    assert_eq!(lines.len(), 3);
+}
+
+#[then("typed Agent show содержит alpha")]
+fn typed_agent_show(world: &mut CatalogWorld) {
+    let agent = world.shown_agent.as_ref().expect("agent show must succeed");
+    assert_eq!(agent.agent(), "alpha");
+    assert_eq!(agent.agent_type(), "codex");
+    assert_eq!(agent.model(), "gpt");
+    assert_eq!(agent.reasoning(), "high");
+}
+
+#[then("JSON Agent show содержит beta")]
+fn agent_show_json(world: &mut CatalogWorld) {
+    let value = world.json();
+    assert_eq!(value["agent"], "beta");
+    assert_eq!(value["type"], "claude");
+    assert_eq!(value["model"], "opus");
+    assert_eq!(value["reasoning"], "high");
+}
+
+#[then("Agent show text содержит выбранную запись")]
+fn agent_show_text(world: &mut CatalogWorld) {
+    assert_eq!(
+        world.stdout(),
+        "agent alpha: type=codex model=gpt reasoning=high\n"
+    );
+}
+
+#[then("typed prompt show содержит точное содержимое demo")]
+fn typed_prompt_show(world: &mut CatalogWorld) {
+    let prompt = world
+        .shown_prompt
+        .as_ref()
+        .expect("prompt show must succeed");
+    assert_eq!(prompt.prompt(), "demo");
+    assert_eq!(prompt.content(), "точный prompt");
+    assert_eq!(prompt.bytes(), 19);
+    assert!(Path::new(prompt.path()).is_absolute());
+}
+
+#[then("prompt show stdout побайтово равен template без newline")]
+fn prompt_show_exact_stdout(world: &mut CatalogWorld) {
+    assert_eq!(world.observed().stdout, "точный prompt".as_bytes());
+}
+
+#[then("JSON prompt show содержит точный content и bytes")]
+fn prompt_show_json(world: &mut CatalogWorld) {
+    let value = world.json();
+    assert_eq!(value["prompt"], "demo");
+    assert_eq!(value["content"], "строка\n");
+    assert_eq!(value["bytes"], 13);
+    assert!(Path::new(value["path"].as_str().expect("path must be a string")).is_absolute());
 }
 
 #[then("catalog не изменил source state")]

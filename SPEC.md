@@ -192,6 +192,9 @@ type из materialized workflow и полного содержимого Agent a
 - Workflow catalog рассматривает только не временные entries `workflow/*.yaml`, требует kebab-case WorkflowId из basename и regular file, сортирует descriptors по WorkflowId и не читает содержимое template или config.
 - Agent catalog читает весь `config.yaml` через общую config validation boundary, не применяет `default-agent`, сортирует descriptors по AgentId и показывает исходные `type`, `model` и `reasoning` каждого named Agent.
 - Prompt catalog рассматривает только не временные entries `prompt/*.md`, требует kebab-case PromptId, regular file и UTF-8, полностью читает bytes до построения descriptor и сортирует результат по PromptId.
+- Workflow show выбирает ровно один source template, проверяет его структурную schema и symbolic IDs, сохраняет исходный порядок Steps и source references, но не читает config или prompts, не применяет defaults и не проверяет существование references либо graph reachability.
+- Agent show полностью проверяет config общей config boundary до выбора одного named Agent и не применяет `default-agent`.
+- Prompt show выбирает и полностью читает ровно один regular UTF-8 template, поэтому ошибки других prompt templates не влияют на результат.
 
 ## Codex Agent type
 

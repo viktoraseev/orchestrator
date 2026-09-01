@@ -1,6 +1,7 @@
 //! Библиотечная часть orchestrator; CLI использует её типизированные операции и не содержит продуктовой логики.
 
 pub mod agent;
+pub mod catalog;
 pub mod config;
 pub mod run;
 pub mod workflow;
@@ -8,6 +9,10 @@ pub mod workflow;
 pub use agent::{
     AgentCancellation, AgentExit, AgentInput, AgentRegistry, AgentRunRequest, AgentSessionObserver,
     AttemptControl, BuiltinAgentRegistry, ProcessAgentRegistry, TerminationSignal,
+};
+pub use catalog::{
+    AgentCatalogEntry, PromptCatalogEntry, WorkflowCatalogEntry, execute_agent_list,
+    execute_prompt_list, execute_workflow_list, list_agents, list_prompts, list_workflows,
 };
 pub use config::{CommandError, ConfigCommand, ConfigKey, ProcessEnvironment, execute_config};
 pub use run::{

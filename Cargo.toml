@@ -35,6 +35,10 @@ harness = false
 name = "run_inspection"
 harness = false
 
+[[test]]
+name = "source_catalog"
+harness = false
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

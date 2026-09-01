@@ -15,9 +15,10 @@ use orchestrator::{
     AgentSessionObserver, CommandError, ConfigCommand, ConfigKey, InspectionFormat,
     InspectionReporter, LifecycleCommand, LifecycleReporter, LifecycleSignals,
     ProcessAgentRegistry, ProcessEnvironment, RunId, RunInspectionState, TerminalMode,
-    TerminationSignal, ValidateCommand, execute_config, execute_lifecycle, execute_run_artifacts,
-    execute_run_list_formatted, execute_run_show_formatted, execute_run_verify, execute_run_watch,
-    execute_validate, open_run_artifact, send_attempt_completion, send_session_activation,
+    TerminationSignal, ValidateCommand, execute_agent_list, execute_config, execute_lifecycle,
+    execute_prompt_list, execute_run_artifacts, execute_run_list_formatted,
+    execute_run_show_formatted, execute_run_verify, execute_run_watch, execute_validate,
+    execute_workflow_list, open_run_artifact, send_attempt_completion, send_session_activation,
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -48,6 +49,18 @@ enum TopLevelCommand {
         #[command(subcommand)]
         command: RunCliCommand,
     },
+    Workflow {
+        #[command(subcommand)]
+        command: CatalogCliCommand,
+    },
+    Agent {
+        #[command(subcommand)]
+        command: CatalogCliCommand,
+    },
+    Prompt {
+        #[command(subcommand)]
+        command: CatalogCliCommand,
+    },
     Session {
         #[command(subcommand)]
         command: SessionCliCommand,
@@ -55,6 +68,14 @@ enum TopLevelCommand {
     Attempt {
         #[command(subcommand)]
         command: AttemptCliCommand,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Subcommand)]
+enum CatalogCliCommand {
+    List {
+        #[arg(long, value_enum, default_value_t = InspectionFormatArgument::Text)]
+        format: InspectionFormatArgument,
     },
 }
 
@@ -371,6 +392,15 @@ fn dispatch(
             Ok(CommandOutput::None)
         }
         TopLevelCommand::Run { command } => dispatch_run(command, environment),
+        TopLevelCommand::Workflow { command } => {
+            dispatch_catalog(CatalogKind::Workflow, command, environment)
+        }
+        TopLevelCommand::Agent { command } => {
+            dispatch_catalog(CatalogKind::Agent, command, environment)
+        }
+        TopLevelCommand::Prompt { command } => {
+            dispatch_catalog(CatalogKind::Prompt, command, environment)
+        }
         TopLevelCommand::Session {
             command: SessionCliCommand::Activate { session_id },
         } => {
@@ -390,6 +420,27 @@ fn dispatch(
             Ok(CommandOutput::None)
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum CatalogKind {
+    Workflow,
+    Agent,
+    Prompt,
+}
+
+fn dispatch_catalog(
+    kind: CatalogKind,
+    command: CatalogCliCommand,
+    environment: &ProcessEnvironment,
+) -> Result<CommandOutput, CommandError> {
+    let CatalogCliCommand::List { format } = command;
+    match kind {
+        CatalogKind::Workflow => execute_workflow_list(environment, format.into()),
+        CatalogKind::Agent => execute_agent_list(environment, format.into()),
+        CatalogKind::Prompt => execute_prompt_list(environment, format.into()),
+    }
+    .map(CommandOutput::Text)
 }
 
 fn dispatch_run(

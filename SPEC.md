@@ -186,6 +186,13 @@ type из materialized workflow и полного содержимого Agent a
 - Watch сразу публикует initial typed snapshot, затем с фиксированным интервалом 100 ms публикует только изменившиеся validated snapshots и завершается на `blocked`, `completed` или поддерживаемом termination signal.
 - Verify проверяет выбранный либо все числовые run directories в порядке RunId, продолжает после независимых validation errors других runs и определяет итоговый код только после формирования полного отчёта.
 
+## Source catalogs
+
+- Source catalog commands перечисляют workflows, named Agents и prompt templates относительно выбранного state root без materialization, создания run или изменения файлов; каждый catalog целиком строится и проверяется до renderer, поэтому ошибка не даёт partial stdout.
+- Workflow catalog рассматривает только не временные entries `workflow/*.yaml`, требует kebab-case WorkflowId из basename и regular file, сортирует descriptors по WorkflowId и не читает содержимое template или config.
+- Agent catalog читает весь `config.yaml` через общую config validation boundary, не применяет `default-agent`, сортирует descriptors по AgentId и показывает исходные `type`, `model` и `reasoning` каждого named Agent.
+- Prompt catalog рассматривает только не временные entries `prompt/*.md`, требует kebab-case PromptId, regular file и UTF-8, полностью читает bytes до построения descriptor и сортирует результат по PromptId.
+
 ## Codex Agent type
 
 - Type `codex` принимает непустой `model` и `reasoning` из множества `low`, `medium`, `high`, `xhigh`, `max`; executable по умолчанию — `codex`.

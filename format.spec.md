@@ -21,6 +21,7 @@ run/<run-id>/<n>.<step-id>.<input-id>.artifact
 - `config.yaml` необязателен. Workflow и prompt templates должны быть regular files.
 - `active.lock` является файлом для kernel lock; его содержимое не имеет контракта.
 - Volatile control socket, временные файлы атомарной записи и временные файлы artifacts не входят в durable layout.
+- Source catalogs игнорируют entries с другими расширениями и имена, начинающиеся с `.`, но каждый не временный `workflow/*.yaml` и `prompt/*.md` считается contract file и обязан иметь валидный ID в basename и быть regular file.
 
 ## Идентификаторы и номера
 
@@ -105,6 +106,7 @@ steps:
 - Неизвестный вид placeholder, неизвестная пара или незакрытый `{{` делают template невалидным.
 - Если artifact для `content` не является UTF-8, prompt нельзя сформировать и текущая команда завершается fail-fast до запуска агента.
 - Prompt template первого описанного Step не может содержать placeholders любого вида.
+- Prompt catalog вычисляет `bytes` из полностью прочитанного UTF-8 содержимого файла, поэтому значение равно размеру template в bytes, а не числу Unicode symbols.
 
 ## Materialized workflow
 

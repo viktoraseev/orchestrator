@@ -59,7 +59,7 @@ impl WorkflowId {
 pub(crate) struct SymbolicId(String);
 
 impl SymbolicId {
-    fn parse(kind: &str, value: &str) -> Result<Self, String> {
+    pub(crate) fn parse(kind: &str, value: &str) -> Result<Self, String> {
         let valid = !value.is_empty()
             && value.split('-').all(|part| {
                 !part.is_empty()
@@ -78,7 +78,7 @@ impl SymbolicId {
         &self.0
     }
 
-    fn into_string(self) -> String {
+    pub(crate) fn into_string(self) -> String {
         self.0
     }
 }

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use cucumber::{World, given, then, when};
 use orchestrator::{
     AgentExit, AgentInput, AgentRegistry, AgentRunRequest, AttemptControl, LifecycleCommand,
-    LifecycleReporter, ProcessEnvironment, execute_lifecycle,
+    LifecycleReporter, LifecycleSignals, ProcessEnvironment, TerminalMode, execute_lifecycle,
 };
 use tempfile::TempDir;
 
@@ -26,6 +26,8 @@ struct LifecycleWorld {
     process_ready: Option<PathBuf>,
     control_code: Option<PathBuf>,
     max_concurrency: usize,
+    sent_signal: Option<String>,
+    shutdown_elapsed: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -42,6 +44,7 @@ struct Call {
     resume_session: Option<String>,
     inputs: Vec<AgentInput>,
     prompt: String,
+    human: bool,
 }
 
 #[derive(Debug)]
@@ -53,6 +56,7 @@ enum Behavior {
     CompleteThenInvalid,
     CompleteWithExit(i32),
     CompleteEmpty,
+    ActivateThenUserExit(String),
 }
 
 #[derive(Debug)]
@@ -106,6 +110,7 @@ impl AgentRegistry for FakeAgentRegistry {
                 resume_session: request.resume_session.map(str::to_owned),
                 inputs: request.inputs.to_vec(),
                 prompt: request.prompt.to_owned(),
+                human: request.human,
             });
         let behavior = self
             .behaviors
@@ -146,11 +151,15 @@ impl AgentRegistry for FakeAgentRegistry {
                 let source = self.root.join("source-artifact");
                 fs::write(&source, b"final").map_err(|error| error.to_string())?;
                 control.complete(&[("result".to_owned(), source)])?;
-                return Ok(AgentExit { code });
+                return Ok(AgentExit::Returned(code));
             }
             Behavior::CompleteEmpty => control.complete(&[])?,
+            Behavior::ActivateThenUserExit(session) => {
+                control.activate_session(&session)?;
+                return Ok(AgentExit::UserExit);
+            }
         }
-        Ok(AgentExit { code: 0 })
+        Ok(AgentExit::Returned(0))
     }
 }
 
@@ -161,6 +170,43 @@ struct ParallelAgentRegistry {
     active: AtomicUsize,
     max_active: AtomicUsize,
     fail_left: bool,
+}
+
+#[derive(Debug)]
+struct UserShutdownRegistry {
+    branches_started: Barrier,
+}
+
+impl AgentRegistry for UserShutdownRegistry {
+    fn validate(&self, type_id: &str, model: &str, reasoning: &str) -> Result<(), String> {
+        if type_id == "codex" && !model.is_empty() && !reasoning.is_empty() {
+            Ok(())
+        } else {
+            Err("невалидный user shutdown fake Agent".to_owned())
+        }
+    }
+
+    fn run(
+        &self,
+        request: &AgentRunRequest<'_>,
+        control: &mut dyn AttemptControl,
+    ) -> Result<AgentExit, String> {
+        match request.step_id {
+            "root" => control.complete(&[])?,
+            "human-branch" => {
+                control.activate_session("human-session")?;
+                self.branches_started.wait();
+                return Ok(AgentExit::UserExit);
+            }
+            "worker" => {
+                self.branches_started.wait();
+                control.complete(&[])?;
+            }
+            "after" => return Err("работа после user shutdown не должна запускаться".to_owned()),
+            other => return Err(format!("неизвестный Step {other}")),
+        }
+        Ok(AgentExit::Returned(0))
+    }
 }
 
 impl ParallelAgentRegistry {
@@ -198,6 +244,7 @@ impl AgentRegistry for ParallelAgentRegistry {
                 resume_session: request.resume_session.map(str::to_owned),
                 inputs: request.inputs.to_vec(),
                 prompt: request.prompt.to_owned(),
+                human: request.human,
             });
         if matches!(request.step_id, "left" | "right") {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -206,14 +253,14 @@ impl AgentRegistry for ParallelAgentRegistry {
             self.branch_barrier.wait();
             if self.fail_left && request.step_id == "left" {
                 self.active.fetch_sub(1, Ordering::SeqCst);
-                return Ok(AgentExit { code: 7 });
+                return Ok(AgentExit::Returned(7));
             }
             control.complete(&[])?;
             self.active.fetch_sub(1, Ordering::SeqCst);
         } else {
             control.complete(&[])?;
         }
-        Ok(AgentExit { code: 0 })
+        Ok(AgentExit::Returned(0))
     }
 }
 
@@ -235,6 +282,24 @@ fn workflow_without_outputs(world: &mut LifecycleWorld) {
 #[given("подготовлен single-step workflow с output result")]
 fn workflow_with_output(world: &mut LifecycleWorld) {
     prepare_workflow(world, &["result"]);
+}
+
+#[given("подготовлен single-step human workflow")]
+fn human_workflow(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: human-step\n    agent: main\n    prompt: null\n    human: true\n    depends-on: []\n    outputs: []\n",
+        None,
+    );
+}
+
+#[given("подготовлен workflow с human и non-human ветвями")]
+fn human_and_non_human_workflow(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: root\n    agent: main\n    prompt: null\n    human: false\n    depends-on: []\n    outputs: []\n  - id: human-branch\n    agent: main\n    prompt: null\n    human: true\n    depends-on: [root]\n    outputs: []\n  - id: worker\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [root]\n    outputs: []\n  - id: after\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [worker]\n    outputs: []\n",
+        None,
+    );
 }
 
 #[given("подготовлен линейный workflow source → target")]
@@ -322,11 +387,37 @@ fn process_agent_waits_for_release(world: &mut LifecycleWorld) {
     );
 }
 
+#[given("process Agent ожидает termination signal")]
+fn process_agent_waits_for_signal(world: &mut LifecycleWorld) {
+    prepare_signal_gate(world);
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\ntrap 'printf HUP > \"$ORC_TEST_SIGNALLED\"; exit 0' HUP\ntrap 'printf INT > \"$ORC_TEST_SIGNALLED\"; exit 0' INT\ntrap 'printf TERM > \"$ORC_TEST_SIGNALLED\"; exit 0' TERM\n: > \"$ORC_TEST_READY\"\nwhile :; do IFS= read -r ignored < \"$ORC_TEST_GATE\" || :; done\n",
+    );
+}
+
+#[given("process Agent игнорирует первый SIGTERM")]
+fn process_agent_ignores_first_term(world: &mut LifecycleWorld) {
+    prepare_signal_gate(world);
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\ntrap ': > \"$ORC_TEST_SIGNALLED\"' TERM\n: > \"$ORC_TEST_READY\"\nwhile :; do IFS= read -r ignored < \"$ORC_TEST_GATE\" || :; done\n",
+    );
+}
+
 #[given("process Agent публикует artifact final через attempt complete")]
 fn process_agent_with_completion(world: &mut LifecycleWorld) {
     prepare_process_agent(
         world,
         "#!/bin/sh\nprintf final > \"$ORC_TEST_ARTIFACT\"\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete --artifact result \"$ORC_TEST_ARTIFACT\"\n",
+    );
+}
+
+#[given("process human Agent проверяет stdin и stdout TTY")]
+fn process_human_agent_checks_terminal(world: &mut LifecycleWorld) {
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\ntest -t 0 && test -t 1 || exit 9\n: > \"$ORC_TEST_TTY_CONFIRMED\"\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n",
     );
 }
 
@@ -418,6 +509,72 @@ fn completed_run(world: &mut LifecycleWorld) {
 #[when("workflow запускается через lifecycle API с возвратом без completion")]
 fn start_without_completion(world: &mut LifecycleWorld) {
     run_start(world, [Behavior::ReturnWithoutCompletion]);
+}
+
+#[when("human workflow запускается без TTY")]
+fn start_human_without_terminal(world: &mut LifecycleWorld) {
+    run_start(world, [Behavior::CompleteEmpty]);
+}
+
+#[when("human workflow запускается с доступным TTY")]
+fn start_human_with_terminal(world: &mut LifecycleWorld) {
+    run_start_with_terminal(world, [Behavior::CompleteEmpty], TerminalMode::Available);
+}
+
+#[when("human Agent активирует session human-session и выполняет /exit")]
+fn human_agent_user_exit(world: &mut LifecycleWorld) {
+    run_start_with_terminal(
+        world,
+        [Behavior::ActivateThenUserExit("human-session".to_owned())],
+        TerminalMode::Available,
+    );
+}
+
+#[when("human ветвь выполняет /exit одновременно с completion worker")]
+fn user_exit_with_parallel_completion(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let registry = UserShutdownRegistry {
+        branches_started: Barrier::new(2),
+    };
+    let mut reporter = VecReporter::default();
+    let result = execute_lifecycle(
+        &LifecycleCommand::start_explicit("delivery").expect("workflow ID must be valid"),
+        &environment(root),
+        TerminalMode::Available,
+        &LifecycleSignals::default(),
+        &registry,
+        &mut reporter,
+    );
+    world.run_id = reporter
+        .0
+        .iter()
+        .find_map(|line| line.strip_prefix("Run "))
+        .filter(|value| !value.ends_with(" exited"))
+        .map(str::to_owned);
+    world.observed = Some(observe(result, reporter));
+}
+
+#[when("human run продолжается с TTY и завершается")]
+fn resume_human_with_terminal(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let registry = FakeAgentRegistry::new(root.path().to_owned(), [Behavior::CompleteEmpty]);
+    let run_id = world.run_id.as_ref().expect("scenario must define run ID");
+    let command =
+        LifecycleCommand::Resume(orchestrator::RunId::parse(run_id).expect("run ID must be valid"));
+    let mut reporter = VecReporter::default();
+    let result = execute_lifecycle(
+        &command,
+        &environment(root),
+        TerminalMode::Available,
+        &LifecycleSignals::default(),
+        &registry,
+        &mut reporter,
+    );
+    world.calls = registry
+        .calls
+        .into_inner()
+        .expect("call log must be available");
+    world.observed = Some(observe(result, reporter));
 }
 
 #[when("Agent активирует sessions a, b, a, a и возвращается без completion")]
@@ -547,6 +704,8 @@ fn run_parallel_diamond(world: &mut LifecycleWorld, fail_left: bool) {
     let result = execute_lifecycle(
         &LifecycleCommand::start_explicit("delivery").expect("workflow ID must be valid"),
         &environment(root),
+        TerminalMode::Unavailable,
+        &LifecycleSignals::default(),
         &registry,
         &mut reporter,
     );
@@ -595,7 +754,14 @@ fn resume_unknown_run(world: &mut LifecycleWorld, run_id: String) {
         orchestrator::RunId::parse(&run_id).expect("run ID must be valid"),
     );
     let mut reporter = VecReporter::default();
-    let result = execute_lifecycle(&command, &environment(root), &registry, &mut reporter);
+    let result = execute_lifecycle(
+        &command,
+        &environment(root),
+        TerminalMode::Unavailable,
+        &LifecycleSignals::default(),
+        &registry,
+        &mut reporter,
+    );
     world.observed = Some(observe(result, reporter));
     world.run_id = Some(run_id);
 }
@@ -633,6 +799,62 @@ fn start_through_process(world: &mut LifecycleWorld) {
         lines,
         error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
     });
+}
+
+#[when("human workflow запускается через системный pseudo-terminal")]
+fn start_human_through_terminal(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let agent = world
+        .process_agent
+        .as_ref()
+        .expect("scenario must define process Agent");
+    let output = Command::new("/usr/bin/script")
+        .args([
+            "-q",
+            "-e",
+            "/dev/null",
+            env!("CARGO_BIN_EXE_orchestrator"),
+            "start",
+            "delivery",
+        ])
+        .env("ORC_HOME", root.path())
+        .env("ORC_AGENT_COMMAND", agent)
+        .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
+        .env("ORC_TEST_TTY_CONFIRMED", root.path().join("tty-confirmed"))
+        .output()
+        .expect("pseudo-terminal command must run");
+    let lines: Vec<String> = String::from_utf8(output.stdout)
+        .expect("stdout must be UTF-8")
+        .lines()
+        .map(|line| line.trim_end_matches('\r').to_owned())
+        .collect();
+    world.run_id = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("Run "))
+        .filter(|value| !value.ends_with(" exited"))
+        .map(str::to_owned);
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines,
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
+#[when(expr = "supervisor получает {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn supervisor_receives_signal(world: &mut LifecycleWorld, signal: String) {
+    run_process_signal_shutdown(world, &signal, false);
+}
+
+#[when("supervisor получает второй SIGTERM")]
+fn supervisor_receives_second_term(world: &mut LifecycleWorld) {
+    run_process_signal_shutdown(world, "TERM", true);
+}
+
+#[when("после одного SIGTERM истекает константный shutdown deadline")]
+fn supervisor_signal_timeout(world: &mut LifecycleWorld) {
+    run_process_signal_shutdown(world, "TERM", false);
 }
 
 #[when("во время первого start запускается competing resume")]
@@ -702,7 +924,37 @@ fn resume_run(world: &mut LifecycleWorld) {
     let command =
         LifecycleCommand::Resume(orchestrator::RunId::parse(run_id).expect("run ID must be valid"));
     let mut reporter = VecReporter::default();
-    let result = execute_lifecycle(&command, &environment(root), &registry, &mut reporter);
+    let result = execute_lifecycle(
+        &command,
+        &environment(root),
+        TerminalMode::Unavailable,
+        &LifecycleSignals::default(),
+        &registry,
+        &mut reporter,
+    );
+    world.calls = registry
+        .calls
+        .into_inner()
+        .expect("call log must be available");
+    world.observed = Some(observe(result, reporter));
+}
+
+#[when("run после signal shutdown продолжается и завершается")]
+fn resume_after_signal_shutdown(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let registry = FakeAgentRegistry::new(root.path().to_owned(), [Behavior::CompleteEmpty]);
+    let run_id = world.run_id.as_ref().expect("scenario must define run ID");
+    let command =
+        LifecycleCommand::Resume(orchestrator::RunId::parse(run_id).expect("run ID must be valid"));
+    let mut reporter = VecReporter::default();
+    let result = execute_lifecycle(
+        &command,
+        &environment(root),
+        TerminalMode::Unavailable,
+        &LifecycleSignals::default(),
+        &registry,
+        &mut reporter,
+    );
     world.calls = registry
         .calls
         .into_inner()
@@ -740,6 +992,7 @@ fn durable_before_agent(world: &mut LifecycleWorld) {
             resume_session: None,
             inputs: Vec::new(),
             prompt: String::new(),
+            human: false,
         }],
         "{:?}",
         world.observed().error
@@ -769,6 +1022,44 @@ fn stable_start_output(world: &mut LifecycleWorld) {
     assert!(lines.last().is_some_and(|line| line.ends_with(" exited")));
 }
 
+#[then("Agent process group получила тот же signal")]
+fn agent_received_same_signal(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let received = fs::read_to_string(root.path().join("signal-received"))
+        .expect("signal marker must be readable");
+    assert_eq!(
+        received,
+        *world.sent_signal.as_ref().expect("signal must be sent")
+    );
+}
+
+#[then("последняя lifecycle строка сообщает exited")]
+fn last_line_reports_exited(world: &mut LifecycleWorld) {
+    assert!(
+        world
+            .observed()
+            .lines
+            .last()
+            .is_some_and(|line| line.ends_with(" exited"))
+    );
+}
+
+#[then("shutdown эскалирован до SIGKILL без изменения кода")]
+fn shutdown_escalated(world: &mut LifecycleWorld) {
+    assert_eq!(world.observed().exit_code, 143);
+    let root = world.root.as_ref().expect("scenario must define root");
+    assert!(root.path().join("signal-received").is_file());
+}
+
+#[then("эскалация произошла не раньше 10 секунд")]
+fn shutdown_waited_ten_seconds(world: &mut LifecycleWorld) {
+    assert!(
+        world
+            .shutdown_elapsed
+            .is_some_and(|elapsed| elapsed >= Duration::from_secs(10))
+    );
+}
+
 #[then("resume запускает тот же attempt 0 с session a")]
 fn resumed_same_attempt(world: &mut LifecycleWorld) {
     assert_eq!(
@@ -779,6 +1070,7 @@ fn resumed_same_attempt(world: &mut LifecycleWorld) {
             resume_session: Some("a".to_owned()),
             inputs: Vec::new(),
             prompt: String::new(),
+            human: false,
         }],
         "{:?}",
         world.observed().error
@@ -964,6 +1256,70 @@ fn agent_not_restarted(world: &mut LifecycleWorld) {
     assert!(world.calls.is_empty());
 }
 
+#[then("human Agent не запускался")]
+fn human_agent_not_started(world: &mut LifecycleWorld) {
+    assert!(world.calls.is_empty());
+}
+
+#[then("Agent получил human terminal mode")]
+fn agent_received_human_mode(world: &mut LifecycleWorld) {
+    assert_eq!(world.calls.len(), 1);
+    assert!(world.calls[0].human);
+    assert_eq!(world.calls[0].step_id, "human-step");
+}
+
+#[then("process human Agent подтвердил прямой TTY")]
+fn process_human_confirmed_terminal(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    assert!(root.path().join("tty-confirmed").is_file());
+}
+
+#[then("lifecycle сообщает interrupted и команду resume")]
+fn reports_user_interruption(world: &mut LifecycleWorld) {
+    let run_id = world.run_id.as_ref().expect("scenario must define run ID");
+    assert!(
+        world
+            .observed()
+            .lines
+            .iter()
+            .any(|line| line == &format!("run {run_id}: interrupted by user"))
+    );
+    assert!(
+        world
+            .observed()
+            .lines
+            .iter()
+            .any(|line| line == &format!("resume: orchestrator resume {run_id}"))
+    );
+}
+
+#[then("human attempt остаётся незавершённым")]
+fn human_attempt_unfinished(world: &mut LifecycleWorld) {
+    let record = fs::read_to_string(run_directory(world).join("0.human-step.attempt.yaml"))
+        .expect("human attempt must be readable");
+    assert!(!record.contains("completed"));
+}
+
+#[then("resume продолжил attempt 0 с session human-session")]
+fn resumed_human_session(world: &mut LifecycleWorld) {
+    assert_eq!(world.calls.len(), 1);
+    assert_eq!(world.calls[0].attempt, 0);
+    assert_eq!(
+        world.calls[0].resume_session.as_deref(),
+        Some("human-session")
+    );
+    assert!(world.calls[0].human);
+}
+
+#[then("worker completion durable, а следующая activation не создана")]
+fn worker_completed_without_next_activation(world: &mut LifecycleWorld) {
+    let directory = run_directory(world);
+    let worker = fs::read_to_string(directory.join("2.worker.attempt.yaml"))
+        .expect("worker attempt must be readable");
+    assert!(worker.trim_end().ends_with("type: completed"));
+    assert!(!directory.join("3.after.attempt.yaml").exists());
+}
+
 #[then("lifecycle сообщает already completed")]
 fn reports_already_completed(world: &mut LifecycleWorld) {
     assert!(
@@ -1025,6 +1381,81 @@ fn prepare_process_agent(world: &mut LifecycleWorld, script: &str) {
     world.process_agent = Some(path);
 }
 
+fn prepare_signal_gate(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let gate = root.path().join("signal-gate");
+    let status = Command::new("mkfifo")
+        .arg(&gate)
+        .status()
+        .expect("mkfifo must run");
+    assert!(status.success());
+    world.process_gate = Some(gate);
+    world.process_ready = Some(root.path().join("signal-ready"));
+}
+
+fn run_process_signal_shutdown(world: &mut LifecycleWorld, signal: &str, repeat: bool) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let agent = world
+        .process_agent
+        .as_ref()
+        .expect("scenario must define process Agent");
+    let gate = world
+        .process_gate
+        .as_ref()
+        .expect("scenario must define signal gate");
+    let ready = world
+        .process_ready
+        .as_ref()
+        .expect("scenario must define ready marker");
+    let marker = root.path().join("signal-received");
+    let child = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["start", "delivery"])
+        .env("ORC_HOME", root.path())
+        .env("ORC_AGENT_COMMAND", agent)
+        .env("ORC_TEST_GATE", gate)
+        .env("ORC_TEST_READY", ready)
+        .env("ORC_TEST_SIGNALLED", &marker)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("orchestrator must start");
+    wait_for_path(ready);
+    let short_signal = signal.strip_prefix("SIG").unwrap_or(signal);
+    let started = Instant::now();
+    send_signal(child.id(), short_signal);
+    if repeat {
+        wait_for_path(&marker);
+        send_signal(child.id(), short_signal);
+    }
+    let output = child.wait_with_output().expect("orchestrator must exit");
+    world.shutdown_elapsed = Some(started.elapsed());
+    world.sent_signal = Some(short_signal.to_owned());
+    let lines: Vec<String> = String::from_utf8(output.stdout)
+        .expect("stdout must be UTF-8")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    world.run_id = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("Run "))
+        .filter(|value| !value.ends_with(" exited"))
+        .map(str::to_owned);
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines,
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
+fn send_signal(process_id: u32, signal: &str) {
+    let status = Command::new("/bin/kill")
+        .args([format!("-{signal}"), process_id.to_string()])
+        .status()
+        .expect("kill command must run");
+    assert!(status.success());
+}
+
 fn wait_for_path(path: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !path.exists() {
@@ -1038,12 +1469,22 @@ fn wait_for_path(path: &std::path::Path) {
 }
 
 fn run_start(world: &mut LifecycleWorld, behaviors: impl IntoIterator<Item = Behavior>) {
+    run_start_with_terminal(world, behaviors, TerminalMode::Unavailable);
+}
+
+fn run_start_with_terminal(
+    world: &mut LifecycleWorld,
+    behaviors: impl IntoIterator<Item = Behavior>,
+    terminal: TerminalMode,
+) {
     let root = world.root.as_ref().expect("scenario must define root");
     let registry = FakeAgentRegistry::new(root.path().to_owned(), behaviors);
     let mut reporter = VecReporter::default();
     let result = execute_lifecycle(
         &LifecycleCommand::start_explicit("delivery").expect("workflow ID must be valid"),
         &environment(root),
+        terminal,
+        &LifecycleSignals::default(),
         &registry,
         &mut reporter,
     );
@@ -1101,4 +1542,6 @@ impl LifecycleWorld {
 async fn main() {
     LifecycleWorld::run("features/lifecycle.feature").await;
     LifecycleWorld::run("features/graph_execution.feature").await;
+    LifecycleWorld::run("features/human_execution.feature").await;
+    LifecycleWorld::run("features/signal_shutdown.feature").await;
 }

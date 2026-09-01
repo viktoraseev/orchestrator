@@ -7,11 +7,11 @@ pub mod workflow;
 
 pub use agent::{
     AgentCancellation, AgentExit, AgentInput, AgentRegistry, AgentRunRequest, AttemptControl,
-    BuiltinAgentRegistry, ProcessAgentRegistry,
+    BuiltinAgentRegistry, ProcessAgentRegistry, TerminationSignal,
 };
 pub use config::{CommandError, ConfigCommand, ConfigKey, ProcessEnvironment, execute_config};
 pub use run::{
-    LifecycleCommand, LifecycleReporter, RunId, execute_lifecycle, send_attempt_completion,
-    send_session_activation,
+    LifecycleCommand, LifecycleReporter, LifecycleSignals, RunId, TerminalMode, execute_lifecycle,
+    send_attempt_completion, send_session_activation,
 };
 pub use workflow::{ValidateCommand, execute_validate, execute_validate_with_registry};

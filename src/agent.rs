@@ -5,7 +5,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -69,29 +69,104 @@ pub struct AgentRunRequest<'a> {
     pub control_endpoint: &'a Path,
     /// Общий сигнал прекращения работы после fail-fast соседнего attempt.
     pub cancellation: &'a AgentCancellation,
+    /// Human attempt напрямую наследует terminal lifecycle-команды.
+    pub human: bool,
+}
+
+#[derive(Debug, Default)]
+struct CancellationState {
+    signal: AtomicU8,
+    escalate: AtomicBool,
 }
 
 /// Кооперативный сигнал остановки параллельных Agent attempts одного lifecycle-вызова.
 #[derive(Clone, Debug, Default)]
-pub struct AgentCancellation(Arc<AtomicBool>);
+pub struct AgentCancellation(Arc<CancellationState>);
 
 impl AgentCancellation {
     /// Показывает, что supervisor уже наблюдал fail-fast outcome соседнего attempt.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.signal().is_some()
     }
 
     pub(crate) fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.cancel_with(TerminationSignal::Terminate);
+    }
+
+    pub(crate) fn cancel_with(&self, signal: TerminationSignal) {
+        let _ =
+            self.0
+                .signal
+                .compare_exchange(0, signal.number(), Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    pub(crate) fn escalate(&self) {
+        self.0.escalate.store(true, Ordering::Release);
+    }
+
+    fn signal(&self) -> Option<TerminationSignal> {
+        TerminationSignal::from_number(self.0.signal.load(Ordering::Acquire))
+    }
+
+    fn should_escalate(&self) -> bool {
+        self.0.escalate.load(Ordering::Acquire)
     }
 }
 
-/// Наблюдаемый supervisor результат возврата процесса агента.
+/// Поддерживаемый lifecycle termination signal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AgentExit {
-    /// Код возврата процесса; отсутствие Unix exit code отображается adapter-specific runtime error.
-    pub code: i32,
+pub enum TerminationSignal {
+    /// Закрытие управляющего терминала (`SIGHUP`).
+    Hangup,
+    /// Прерывание пользователя (`SIGINT`).
+    Interrupt,
+    /// Запрос штатного завершения (`SIGTERM`).
+    Terminate,
+}
+
+impl TerminationSignal {
+    /// Номер Unix signal.
+    #[must_use]
+    pub const fn number(self) -> u8 {
+        match self {
+            Self::Hangup => 1,
+            Self::Interrupt => 2,
+            Self::Terminate => 15,
+        }
+    }
+
+    /// Документированный lifecycle exit code `128 + signal`.
+    #[must_use]
+    pub const fn exit_code(self) -> u8 {
+        128 + self.number()
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Hangup => "HUP",
+            Self::Interrupt => "INT",
+            Self::Terminate => "TERM",
+        }
+    }
+
+    pub(crate) const fn from_number(number: u8) -> Option<Self> {
+        match number {
+            1 => Some(Self::Hangup),
+            2 => Some(Self::Interrupt),
+            15 => Some(Self::Terminate),
+            _ => None,
+        }
+    }
+}
+
+/// Распознанный Agent type результат возврата процесса агента.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentExit {
+    /// Обычный возврат процесса с наблюдаемым exit code.
+    Returned(i32),
+    /// Human Agent распознал явную команду пользователя `/exit`.
+    UserExit,
 }
 
 /// Registry встроенных или тестовых Agent type.
@@ -206,10 +281,18 @@ impl AgentRegistry for ProcessAgentRegistry {
         if let Some(session_id) = request.resume_session {
             command.env("ORC_RESUME_SESSION", OsStr::new(session_id));
         }
-        command
-            .process_group(0)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.process_group(0);
+        if request.human {
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
+        } else {
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+        }
         let mut child = command.spawn().map_err(|error| {
             format!(
                 "не удалось запустить Agent type '{}': {error}",
@@ -226,11 +309,15 @@ impl AgentRegistry for ProcessAgentRegistry {
             })? {
                 break status;
             }
-            if request.cancellation.is_cancelled() && termination_deadline.is_none() {
-                signal_process_group(child.id(), "TERM")?;
+            if let Some(signal) = request.cancellation.signal()
+                && termination_deadline.is_none()
+            {
+                signal_process_group(child.id(), signal.name())?;
                 termination_deadline = Some(Instant::now() + Duration::from_secs(10));
             }
-            if termination_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if request.cancellation.should_escalate()
+                || termination_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 signal_process_group(child.id(), "KILL")?;
                 break child.wait().map_err(|error| {
                     format!(
@@ -243,7 +330,7 @@ impl AgentRegistry for ProcessAgentRegistry {
         };
         status
             .code()
-            .map(|code| AgentExit { code })
+            .map(AgentExit::Returned)
             .ok_or_else(|| format!("Agent type '{}' завершён сигналом", request.type_id))
     }
 }

@@ -151,6 +151,14 @@ pub enum CommandError {
         /// Диагностика с контекстом lifecycle или control-команды.
         context: String,
     },
+    /// Lifecycle остановлен поддерживаемым Unix termination signal.
+    #[error("{context}")]
+    Interrupted {
+        /// Диагностика с первым полученным сигналом.
+        context: String,
+        /// Документированный код `128 + signal`.
+        exit_code: u8,
+    },
     /// Состояние не удалось прочитать по причине ошибки ввода-вывода.
     #[error("{context}: {source}")]
     Runtime {
@@ -171,6 +179,7 @@ impl CommandError {
             Self::Invalid { .. } => 3,
             Self::NotFound { .. } => 4,
             Self::Busy { .. } => 5,
+            Self::Interrupted { exit_code, .. } => *exit_code,
             Self::Runtime { .. } => 1,
         }
     }

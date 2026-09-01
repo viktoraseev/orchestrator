@@ -2,16 +2,20 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::thread;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use orchestrator::{
-    CommandError, ConfigCommand, ConfigKey, LifecycleCommand, LifecycleReporter,
-    ProcessAgentRegistry, ProcessEnvironment, RunId, ValidateCommand, execute_config,
-    execute_lifecycle, execute_validate, send_attempt_completion, send_session_activation,
+    CommandError, ConfigCommand, ConfigKey, LifecycleCommand, LifecycleReporter, LifecycleSignals,
+    ProcessAgentRegistry, ProcessEnvironment, RunId, TerminalMode, TerminationSignal,
+    ValidateCommand, execute_config, execute_lifecycle, execute_validate, send_attempt_completion,
+    send_session_activation,
 };
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 
 #[derive(Debug, Parser)]
 #[command(name = "orchestrator", disable_help_subcommand = true)]
@@ -186,7 +190,48 @@ fn run_lifecycle(
         .map_err(|context| CommandError::Invalid {
             context: format!("lifecycle: {context}"),
         })?;
-    execute_lifecycle(command, environment, &registry, &mut StdoutReporter)
+    let terminal = if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        TerminalMode::Available
+    } else {
+        TerminalMode::Unavailable
+    };
+    let signals = LifecycleSignals::default();
+    install_signal_listener(&signals)?;
+    execute_lifecycle(
+        command,
+        environment,
+        terminal,
+        &signals,
+        &registry,
+        &mut StdoutReporter,
+    )
+}
+
+fn install_signal_listener(state: &LifecycleSignals) -> Result<(), CommandError> {
+    let mut signals =
+        Signals::new([SIGHUP, SIGINT, SIGTERM]).map_err(|source| CommandError::Runtime {
+            context: "lifecycle: не удалось установить signal handlers".to_owned(),
+            source,
+        })?;
+    let state = state.clone();
+    thread::Builder::new()
+        .name("orchestrator-signals".to_owned())
+        .spawn(move || {
+            for signal in signals.forever() {
+                let signal = match signal {
+                    SIGHUP => TerminationSignal::Hangup,
+                    SIGINT => TerminationSignal::Interrupt,
+                    SIGTERM => TerminationSignal::Terminate,
+                    _ => continue,
+                };
+                state.notify(signal);
+            }
+        })
+        .map(|_| ())
+        .map_err(|source| CommandError::Runtime {
+            context: "lifecycle: не удалось запустить signal listener".to_owned(),
+            source,
+        })
 }
 
 fn control_context(context: &str) -> Result<(PathBuf, RunId, u64), CommandError> {

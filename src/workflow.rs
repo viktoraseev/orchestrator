@@ -304,6 +304,13 @@ fn replace_context(error: CommandError, context: &str) -> CommandError {
         CommandError::Busy { context: value } => CommandError::Busy {
             context: replace(value),
         },
+        CommandError::Interrupted {
+            context: value,
+            exit_code,
+        } => CommandError::Interrupted {
+            context: replace(value),
+            exit_code,
+        },
         CommandError::Runtime {
             context: value,
             source,

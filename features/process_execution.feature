@@ -9,6 +9,7 @@ Feature: Исполнение произвольных процессов в wor
       Given подготовлен workflow с Process producer и Process consumer
       When запускается workflow с parameter mode содержащим пробел
       Then Process получает ровно шесть argv: --mode, fast mode, --input, absolute input path, --output, absolute output path
+      And Process получает StepId convert, RunId, attempt 1, YAML input и output mappings без control endpoint
       And Process output опубликован как artifact
       And materialized workflow содержит точное значение parameter
 

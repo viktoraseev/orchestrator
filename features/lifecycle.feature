@@ -121,5 +121,6 @@ Feature: Durable lifecycle run
       And process Agent публикует artifact final через attempt complete
       When запускается orchestrator start delivery
       Then lifecycle завершается с кодом 0
+      And дочерний orchestrator использовал унаследованные ORC_HOME, ORC_CONTROL_ENDPOINT, ORC_RUN_ID и ORC_ATTEMPT
       And durable artifact result содержит bytes final
       And lifecycle сообщает о завершении run

@@ -43,7 +43,9 @@
 ## Стабильные команды
 
 - `./scripts/test.sh` последовательно проверяет форматирование, запускает Clippy с предупреждениями как ошибками и весь детерминированный набор тестов, включая Cucumber test target.
+- `./scripts/test-fast.sh` выполняет те же проверки, но исключает Cucumber-сценарии с тегом `@slow`; он предназначен для короткого локального цикла и не заменяет финальный `./scripts/test.sh`.
 - `./scripts/test.sh` запускайте вне sandbox: `@process`-сценариям нужны Unix sockets, process groups и сигналы, а sandbox может вернуть `Operation not permitted` и каскадные timeout.
+- `./scripts/test-fast.sh` также запускайте вне sandbox: исключение `@slow` не исключает остальные `@process`-сценарии.
 - `./scripts/build.sh` собирает release-бинарь `orchestrator`.
 - Перед завершением работы запускайте `./scripts/test.sh` и `./scripts/build.sh`; локальная разработка и CI используют эти команды как канонические проверки.
 

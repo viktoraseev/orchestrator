@@ -39,7 +39,7 @@ fn agent_and_process_workflow(world: &mut ProcessWorld) {
     let consumer = executable(
         root,
         "consumer.sh",
-        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > \"$ORC_HOME/process.args\"\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --mode) mode=$2; shift 2 ;;\n    --input) input=$2; shift 2 ;;\n    --output) output=$2; shift 2 ;;\n  esac\ndone\nprintf '%s:' \"$mode\" > \"$output\"\n/bin/cat \"$input\" >> \"$output\"\n",
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > \"$ORC_HOME/process.args\"\nprintf '%s\\n%s\\n%s\\n' \"$ORC_STEP_ID\" \"$ORC_RUN_ID\" \"$ORC_ATTEMPT\" > \"$ORC_HOME/process.env\"\nprintf '%s' \"$ORC_INPUT\" > \"$ORC_HOME/process.input\"\nprintf '%s' \"$ORC_OUTPUT\" > \"$ORC_HOME/process.output\"\nif [ \"${ORC_CONTROL_ENDPOINT+x}\" = x ]; then exit 8; fi\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --mode) mode=$2; shift 2 ;;\n    --input) input=$2; shift 2 ;;\n    --output) output=$2; shift 2 ;;\n  esac\ndone\nprintf '%s:' \"$mode\" > \"$output\"\n/bin/cat \"$input\" >> \"$output\"\n",
     );
     fs::write(
         root.join("workflow/delivery.yaml"),
@@ -71,6 +71,37 @@ fn exact_argv(world: &mut ProcessWorld) {
     assert!(Path::new(values[3]).is_absolute());
     assert_eq!(values[4], "--output");
     assert!(Path::new(values[5]).is_absolute());
+}
+
+#[then(
+    "Process получает StepId convert, RunId, attempt 1, YAML input и output mappings без control endpoint"
+)]
+fn exact_process_environment(world: &mut ProcessWorld) {
+    let root = world.root().to_owned();
+    let environment =
+        fs::read_to_string(root.join("process.env")).expect("Process environment must be readable");
+    let values: Vec<&str> = environment.lines().collect();
+    assert_eq!(values[0], "convert");
+    assert_eq!(
+        values[1],
+        world.run_id.as_deref().expect("run ID must exist")
+    );
+    assert_eq!(values[2], "1");
+    let input = fs::read_to_string(root.join("process.input"))
+        .expect("Process input mapping must be readable");
+    assert!(input.contains("step-id: produce"));
+    assert!(input.contains("input-id: source"));
+    assert!(input.contains("path:"));
+    let output = fs::read_to_string(root.join("process.output"))
+        .expect("Process output mapping must be readable");
+    let outputs: std::collections::BTreeMap<String, PathBuf> =
+        serde_yaml::from_str(&output).expect("Process output mapping must be YAML");
+    let result = outputs.get("result").expect("result output must exist");
+    assert!(result.is_absolute());
+    assert_eq!(
+        result.file_name().and_then(|name| name.to_str()),
+        Some("result")
+    );
 }
 
 #[then("Process output опубликован как artifact")]

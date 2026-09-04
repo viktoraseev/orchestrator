@@ -24,6 +24,7 @@ struct LifecycleWorld {
     calls: Vec<Call>,
     durable_snapshot: Vec<(String, Vec<u8>)>,
     process_agent: Option<PathBuf>,
+    default_agent_path: Option<PathBuf>,
     process_gate: Option<PathBuf>,
     process_ready: Option<PathBuf>,
     control_code: Option<PathBuf>,
@@ -50,6 +51,207 @@ fn workflow_for_agent_type(world: &mut LifecycleWorld, agent_type: String) {
     world.agent_type = Some(agent_type);
 }
 
+#[given(expr = "config содержит Agent type {word} с model {word} и reasoning {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn config_for_agent_type(
+    world: &mut LifecycleWorld,
+    agent_type: String,
+    model: String,
+    reasoning: String,
+) {
+    let root = TempDir::new().expect("test root must be created");
+    let model = if model == "empty" { "" } else { &model };
+    let reasoning = if reasoning == "empty" { "" } else { &reasoning };
+    fs::write(
+        root.path().join("config.yaml"),
+        format!(
+            "agents:\n  main:\n    type: {agent_type}\n    model: '{model}'\n    reasoning: '{reasoning}'\n"
+        ),
+    )
+    .expect("config must be written");
+    world.root = Some(root);
+}
+
+#[when("config проверяется встроенным Agent registry")]
+fn validate_config_with_builtin_registry(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let output = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["config", "list"])
+        .env("ORC_HOME", root.path())
+        .output()
+        .expect("orchestrator config list must run");
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines: String::from_utf8(output.stdout)
+            .expect("stdout must be UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
+#[then(expr = "проверка config завершается с кодом {int}")]
+fn config_validation_exits_with(world: &mut LifecycleWorld, code: u8) {
+    assert_eq!(
+        world.observed().exit_code,
+        code,
+        "{:?}",
+        world.observed().error
+    );
+}
+
+#[given(expr = "в изолированном PATH доступен fake executable {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn default_agent_executable(world: &mut LifecycleWorld, agent_type: String) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = world.root.as_ref().expect("scenario must define root");
+    let bin = root.path().join("bin");
+    fs::create_dir(&bin).expect("isolated PATH directory must be created");
+    let path = bin.join(&agent_type);
+    let session = match agent_type.as_str() {
+        "codex" => "{\"type\":\"thread.started\",\"thread_id\":\"default-session\"}",
+        "claude" => "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"default-session\"}",
+        other => panic!("unknown Agent type: {other}"),
+    };
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{session}'\n: > \"$ORC_HOME/default-{agent_type}-started\"\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n"
+        ),
+    )
+    .expect("default Agent executable must be written");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+        .expect("default Agent executable must be executable");
+    world.default_agent_path = Some(bin);
+}
+
+#[when("workflow запускается без ORC_AGENT_COMMAND")]
+fn start_with_default_agent_executable(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let path = world
+        .default_agent_path
+        .as_ref()
+        .expect("scenario must define isolated PATH");
+    let output = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["start", "delivery"])
+        .env("ORC_HOME", root.path())
+        .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
+        .env("PATH", path)
+        .env_remove("ORC_AGENT_COMMAND")
+        .output()
+        .expect("orchestrator start must run");
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines: String::from_utf8(output.stdout)
+            .expect("stdout must be UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
+#[then(expr = "был запущен default executable {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn default_agent_executable_started(world: &mut LifecycleWorld, agent_type: String) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    assert!(
+        root.path()
+            .join(format!("default-{agent_type}-started"))
+            .is_file()
+    );
+}
+
+#[given(expr = "подготовлен single-step human workflow для Agent type {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn human_workflow_for_agent_type(world: &mut LifecycleWorld, agent_type: String) {
+    workflow_for_agent_type(world, agent_type);
+    let root = world.root.as_ref().expect("scenario must define root");
+    fs::write(
+        root.path().join("workflow/delivery.yaml"),
+        "steps:\n  - id: first\n    agent: main\n    prompt: null\n    human: true\n    depends-on: []\n    outputs: []\n",
+    )
+    .expect("human workflow must be written");
+}
+
+#[given("process human Agent записывает args, активирует session и на resume завершает attempt")]
+fn process_human_agent_records_args(world: &mut LifecycleWorld) {
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\ntest -t 0 && test -t 1 || exit 9\nif [ -n \"${ORC_RESUME_SESSION:-}\" ]; then\n  printf '%s\\n' \"$@\" > \"$ORC_HOME/human.resume.args\"\n  : > \"$ORC_HOME/human.resume.tty\"\n  \"$ORC_TEST_ORCHESTRATOR\" attempt complete\nelse\n  printf '%s\\n' \"$@\" > \"$ORC_HOME/human.start.args\"\n  : > \"$ORC_HOME/human.start.tty\"\n  \"$ORC_TEST_ORCHESTRATOR\" session activate human-session\nfi\n",
+    );
+}
+
+#[when("human workflow запускается и продолжается через системный pseudo-terminal")]
+fn start_and_resume_human_through_terminal(world: &mut LifecycleWorld) {
+    start_human_through_terminal(world);
+    assert_eq!(
+        world.observed().exit_code,
+        1,
+        "{:?}",
+        world.observed().error
+    );
+    resume_human_through_process_terminal(world);
+}
+
+#[then("обе human команды получили прямой TTY")]
+fn both_human_commands_received_tty(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    assert!(root.path().join("human.start.tty").is_file());
+    assert!(root.path().join("human.resume.tty").is_file());
+}
+
+#[then(expr = "process human Agent получил точные start и resume args для {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn exact_human_agent_args(world: &mut LifecycleWorld, agent_type: String) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let start = fs::read_to_string(root.path().join("human.start.args"))
+        .expect("human start args must be readable");
+    let resume = fs::read_to_string(root.path().join("human.resume.args"))
+        .expect("human resume args must be readable");
+    let actual_start: Vec<&str> = start.lines().collect();
+    let actual_resume: Vec<&str> = resume.lines().collect();
+    let (expected_start, expected_resume) = match agent_type.as_str() {
+        "codex" => (
+            vec![
+                "--model",
+                "model",
+                "--config",
+                "model_reasoning_effort=\"high\"",
+                "",
+            ],
+            vec![
+                "resume",
+                "--model",
+                "model",
+                "--config",
+                "model_reasoning_effort=\"high\"",
+                "human-session",
+                "",
+            ],
+        ),
+        "claude" => (
+            vec!["--model", "model", "--effort", "high", ""],
+            vec![
+                "--model",
+                "model",
+                "--effort",
+                "high",
+                "--resume",
+                "human-session",
+                "",
+            ],
+        ),
+        other => panic!("unknown Agent type: {other}"),
+    };
+    assert_eq!(actual_start, expected_start);
+    assert_eq!(actual_resume, expected_resume);
+}
+
 #[given("process Agent записывает args и environment и завершает attempt")]
 fn process_agent_records_contract(world: &mut LifecycleWorld) {
     prepare_process_agent(
@@ -58,10 +260,22 @@ fn process_agent_records_contract(world: &mut LifecycleWorld) {
     );
 }
 
-#[given("ORC_AGENT_COMMAND указывает на отсутствующий absolute path")]
-fn missing_process_agent(world: &mut LifecycleWorld) {
+#[given(regex = r"^ORC_AGENT_COMMAND является (.+)$")]
+#[allow(clippy::needless_pass_by_value)]
+fn invalid_process_agent(world: &mut LifecycleWorld, case: String) {
     let root = world.root.as_ref().expect("scenario must define root");
-    world.process_agent = Some(root.path().join("missing-agent"));
+    let path = match case.as_str() {
+        "relative path" => PathBuf::from("fake-agent"),
+        "отсутствующий absolute path" => root.path().join("missing-agent"),
+        "directory" => root.path().to_owned(),
+        "non-executable regular file" => {
+            let path = root.path().join("non-executable-agent");
+            fs::write(&path, "#!/bin/sh\nexit 0\n").expect("fixture must be written");
+            path
+        }
+        other => panic!("unknown ORC_AGENT_COMMAND case: {other}"),
+    };
+    world.process_agent = Some(path);
 }
 
 #[then(expr = "process Agent получил точные args для {word}")]
@@ -90,6 +304,65 @@ fn exact_agent_args(world: &mut LifecycleWorld, agent_type: String) {
             "model",
             "--effort",
             "high",
+            "",
+        ],
+        other => panic!("unknown Agent type: {other}"),
+    };
+    assert_eq!(actual, expected);
+}
+
+#[given(
+    "process Agent сначала активирует session, а на resume записывает args и завершает attempt"
+)]
+fn process_agent_records_resume_args(world: &mut LifecycleWorld) {
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\nif [ -n \"${ORC_RESUME_SESSION:-}\" ]; then\n  printf '%s\\n' \"$@\" > \"$ORC_HOME/agent.resume.args\"\n  \"$ORC_TEST_ORCHESTRATOR\" attempt complete\nfi\n",
+    );
+}
+
+#[when("запускаются start и resume через process Agent")]
+fn start_and_resume_through_process(world: &mut LifecycleWorld) {
+    start_through_process(world);
+    assert_eq!(
+        world.observed().exit_code,
+        1,
+        "{:?}",
+        world.observed().error
+    );
+    resume_through_process(world);
+}
+
+#[then(expr = "process Agent получил точные resume args для {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn exact_resume_agent_args(world: &mut LifecycleWorld, agent_type: String) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let args = fs::read_to_string(root.path().join("agent.resume.args"))
+        .expect("resume Agent args must be readable");
+    let actual: Vec<&str> = args.lines().collect();
+    let expected = match agent_type.as_str() {
+        "codex" => vec![
+            "exec",
+            "resume",
+            "--json",
+            "--model",
+            "model",
+            "--config",
+            "model_reasoning_effort=\"high\"",
+            "fake-session",
+            "",
+        ],
+        "claude" => vec![
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--model",
+            "model",
+            "--effort",
+            "high",
+            "--resume",
+            "fake-session",
             "",
         ],
         other => panic!("unknown Agent type: {other}"),
@@ -146,15 +419,17 @@ fn initial_attempt_not_created(world: &mut LifecycleWorld) {
     );
 }
 
-#[given(expr = "process Agent публикует два сообщения для {word} и завершает attempt")]
+#[given(
+    expr = "process Agent игнорирует неизвестный event, публикует два сообщения для {word} и завершает attempt"
+)]
 #[allow(clippy::needless_pass_by_value)]
 fn process_agent_publishes_messages(world: &mut LifecycleWorld, agent_type: String) {
     let events = match agent_type.as_str() {
         "codex" => {
-            "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"first\"}}'\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\" second\\n  message \"}}'"
+            "printf '%s\\n' '{\"type\":\"future.event\",\"payload\":true}'\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"first\"}}'\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\" second\\n  message \"}}'"
         }
         "claude" => {
-            "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first\"}]}}'\nprintf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\" second\\n  message \"}]}}'"
+            "printf '%s\\n' '{\"type\":\"future.event\",\"payload\":true}'\nprintf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first\"}]}}'\nprintf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\" second\"},{\"type\":\"tool_use\"},{\"type\":\"text\",\"text\":\"message \"}]}}'"
         }
         other => panic!("unknown Agent type: {other}"),
     };
@@ -227,6 +502,35 @@ fn process_agent_returns_protocol(
         .join("\n");
     prepare_raw_process_agent(world, &format!("#!/bin/sh\n{body}\n"));
     world.protocol_case = Some(protocol_case);
+}
+
+#[given(
+    expr = "process Agent для {word} повторяет session ID и передаёт неизвестный валидный event"
+)]
+#[allow(clippy::needless_pass_by_value)]
+fn process_agent_repeats_session_and_unknown_event(world: &mut LifecycleWorld, agent_type: String) {
+    let session = match agent_type.as_str() {
+        "codex" => "{\"type\":\"thread.started\",\"thread_id\":\"same-session\"}",
+        "claude" => "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"same-session\"}",
+        other => panic!("unknown Agent type: {other}"),
+    };
+    prepare_raw_process_agent(
+        world,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' '{session}'\nprintf '%s\\n' '{{\"type\":\"future.event\",\"payload\":true}}'\nprintf '%s\\n' '{session}'\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n"
+        ),
+    );
+}
+
+#[then("durable attempt содержит одну session activation")]
+fn durable_attempt_has_one_session_activation(world: &mut LifecycleWorld) {
+    let text = fs::read_to_string(run_directory(world).join("0.first.attempt.yaml"))
+        .expect("attempt record must be readable");
+    let sessions: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("  session-id: "))
+        .collect();
+    assert_eq!(sessions, ["same-session"]);
 }
 
 #[then("protocol failure не создал выдуманную session")]
@@ -767,6 +1071,23 @@ fn process_agent_with_completion(world: &mut LifecycleWorld) {
     );
 }
 
+#[then(
+    "дочерний orchestrator использовал унаследованные ORC_HOME, ORC_CONTROL_ENDPOINT, ORC_RUN_ID и ORC_ATTEMPT"
+)]
+fn child_orchestrator_used_inherited_control_context(world: &mut LifecycleWorld) {
+    assert_eq!(
+        world.observed().exit_code,
+        0,
+        "{:?}",
+        world.observed().error
+    );
+    assert!(
+        run_directory(world)
+            .join("0.first.result.artifact")
+            .is_file()
+    );
+}
+
 #[given("process human Agent проверяет stdin и stdout TTY")]
 fn process_human_agent_checks_terminal(world: &mut LifecycleWorld) {
     prepare_process_agent(
@@ -1276,6 +1597,32 @@ fn start_through_process(world: &mut LifecycleWorld) {
     });
 }
 
+fn resume_through_process(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let agent = world
+        .process_agent
+        .as_ref()
+        .expect("scenario must define process Agent");
+    let run_id = world.run_id.as_ref().expect("scenario must define run ID");
+    let output = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["resume", run_id])
+        .env("ORC_HOME", root.path())
+        .env("ORC_AGENT_COMMAND", agent)
+        .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
+        .output()
+        .expect("orchestrator resume must run");
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines: String::from_utf8(output.stdout)
+            .expect("stdout must be UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
 #[when("human workflow запускается через системный pseudo-terminal")]
 #[when("workflow запускается через pseudo-terminal")]
 fn start_human_through_terminal(world: &mut LifecycleWorld) {
@@ -1313,6 +1660,39 @@ fn start_human_through_terminal(world: &mut LifecycleWorld) {
         exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
             .expect("fixture exit code must fit u8"),
         lines,
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
+fn resume_human_through_process_terminal(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let agent = world
+        .process_agent
+        .as_ref()
+        .expect("scenario must define process Agent");
+    let run_id = world.run_id.as_ref().expect("scenario must define run ID");
+    let output = Command::new("/usr/bin/script")
+        .args([
+            "-q",
+            "-e",
+            "/dev/null",
+            env!("CARGO_BIN_EXE_orchestrator"),
+            "resume",
+            run_id,
+        ])
+        .env("ORC_HOME", root.path())
+        .env("ORC_AGENT_COMMAND", agent)
+        .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
+        .output()
+        .expect("pseudo-terminal resume must run");
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines: String::from_utf8(output.stdout)
+            .expect("stdout must be UTF-8")
+            .lines()
+            .map(|line| line.trim_end_matches('\r').to_owned())
+            .collect(),
         error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
     });
 }

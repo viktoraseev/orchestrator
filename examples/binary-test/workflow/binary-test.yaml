@@ -1,0 +1,33 @@
+parameters:
+  value: string
+steps:
+  - id: seed
+    process:
+      executable: /bin/echo
+      args: ["{{param:value}}"]
+      stdout: value
+    human: false
+    depends-on: []
+    outputs: [value]
+  - id: left
+    process:
+      executable: /bin/cp
+      args: ["{{path:seed:value}}", "{{output:value}}"]
+    human: false
+    depends-on: [seed]
+    outputs: [value]
+  - id: right
+    process:
+      executable: /bin/cp
+      args: ["{{path:seed:value}}", "{{output:value}}"]
+    human: false
+    depends-on: [seed]
+    outputs: [value]
+  - id: join
+    process:
+      executable: /usr/bin/paste
+      args: ["-d", "|", "{{path:left:value}}", "{{path:right:value}}"]
+      stdout: result
+    human: false
+    depends-on: [left, right]
+    outputs: [result]

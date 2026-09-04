@@ -22,11 +22,6 @@
 
 - Пути из `format.spec.md` отсчитываются от корня состояния. Корень по умолчанию задан там и разрешается через `HOME`.
 - Замена корня не добавляет альтернативных мест поиска: правило об отсутствии поиска в текущем каталоге и fallback-путей действует и для `ORC_HOME`.
-- `ORC_AGENT_COMMAND` задаёт исполняемый файл сразу для всех Agent type. При непустом значении запускается именно он и поиск по `PATH` не выполняется. Значение обязано быть абсолютным путём существующего executable regular file, иначе команда завершается кодом `3` до запуска агента и без изменения run.
-- Замена исполняемого файла не меняет остальное поведение type: аргументы, environment запуска и интерпретация протокола остаются его собственными по разделам Agent type в `SPEC.md`; дополнительный type-ID argument не добавляется, а fake executable различает adapter по Codex или Claude CLI-аргументам.
-- Каждый Agent process получает `ORC_STEP_ID`, `ORC_CONTROL_ENDPOINT`, `ORC_RUN_ID`, `ORC_ATTEMPT` и полный YAML input mapping в `ORC_INPUT`; эти переменные не заменяют type-specific prompt, model, reasoning и native resume arguments.
-- Каждый Process Step получает `ORC_STEP_ID`, `ORC_RUN_ID`, `ORC_ATTEMPT`, полный YAML input mapping в `ORC_INPUT` и YAML output mapping в `ORC_OUTPUT`; `ORC_CONTROL_ENDPOINT` ему не передаётся.
-- Supervisor передаёт эти переменные дочернему `orchestrator` без изменений, поэтому `attempt complete` и `session activate` работают в том же корне и с тем же выбором исполняемых файлов. Дочерний процесс их не переопределяет.
 
 ## Выбор workflow
 

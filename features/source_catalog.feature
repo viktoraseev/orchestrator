@@ -1,4 +1,5 @@
 Feature: Read-only catalogs source definitions
+  Catalog commands читают только выбранный state root, не materialize'ят workflow, не создают run и не изменяют файлы; весь catalog проверяется до renderer, поэтому ошибка не даёт partial stdout.
 
   @spec:source-catalogs @format:корень-состояния-и-layout @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Workflow catalog перечисляет source templates без materialization

@@ -5,7 +5,7 @@
 
 ## Корень состояния и layout
 
-- По умолчанию корнем состояния является `~/.orc`; `ORC_HOME` заменяет его по правилам `cli.md`.
+- По умолчанию корнем состояния является `~/.orc`.
 - Относительно выбранного корня используются только следующие пути:
 
 ```text
@@ -18,20 +18,8 @@ run/<run-id>/<n>.<step-id>.attempt.yaml
 run/<run-id>/<n>.<step-id>.<input-id>.artifact
 ```
 
-- `config.yaml` необязателен. Workflow и prompt templates должны быть regular files.
 - `active.lock` является файлом для kernel lock; его содержимое не имеет контракта.
 - Volatile control socket, временные файлы атомарной записи и временные файлы artifacts не входят в durable layout.
-- Source catalogs игнорируют entries с другими расширениями и имена, начинающиеся с `.`, но каждый не временный `workflow/*.yaml` и `prompt/*.md` считается contract file и обязан иметь валидный ID в basename и быть regular file.
-- Show-команды строят выбранный путь только из предварительно проверенного symbolic ID и соответствующего фиксированного layout `workflow/<workflow-id>.yaml` либо `prompt/<prompt-id>.md`, не перечисляя соседние entries.
-
-## Идентификаторы и номера
-
-- `RunId` записывается десятичным Unix timestamp создания в миллисекундах.
-- Порядковый номер Agent attempt `n` записывается десятичным целым, начинается с `0` и относится к единой последовательности attempts всего run.
-
-- Все символические IDs, включая WorkflowId, StepId, InputId, AgentId, AgentTypeId и PromptId, имеют kebab-case форму и соответствуют `[a-z0-9]+(?:-[a-z0-9]+)*`. Начальный, конечный или повторяющийся дефис запрещён.
-- Компоненты составных имён файлов разделяются точками; точка не может входить ни в один символический ID.
-- Native session ID является непрозрачным значением Agent type и этому формату не подчиняется.
 
 ## Общие правила YAML
 
@@ -39,41 +27,23 @@ run/<run-id>/<n>.<step-id>.<input-id>.artifact
 - Повторяющиеся mapping keys и неизвестные описанной ниже схеме поля запрещены.
 - Нарушение схемы или формата ID делает файл невалидным; поведение использующей его команды определено в `cli.md`.
 
-## `config.yaml`
-
-- Корневой mapping допускает только необязательные поля `default-workflow`, `default-agent`, `max-parallel-agents` и `agents`.
-- `default-workflow` содержит WorkflowId, `default-agent` — AgentId, `max-parallel-agents` — положительный integer общего лимита одновременно работающих процессов агентов, а `agents` — mapping из AgentId в Agent:
-```yaml
-default-workflow: delivery
-default-agent: codex-main
-max-parallel-agents: 5
-agents:
-  codex-main:
-    type: codex
-    model: gpt-5-codex
-    reasoning: high
-```
-
-- Agent содержит ровно три обязательных строковых поля: `type` с AgentTypeId, `model` и `reasoning`.
-- Generic полей `command` и `environment` нет.
-- `default-agent` обязан ссылаться на запись в `agents`.
-- Agent type обязан существовать во встроенном registry, а допустимость `model` и `reasoning` проверяет его реализация.
-- Отсутствующий `max-parallel-agents` эквивалентен значению `5`; отсутствующий файл также эквивалентен отсутствующим workflow и Agent defaults и пустому mapping `agents`.
-
 ## Workflow template
 
-- Workflow template находится в `workflow/<workflow-id>.yaml`, а его WorkflowId совпадает с именем файла без `.yaml`.
-- Корневой mapping содержит единственное обязательное поле `steps` — непустую упорядоченную последовательность Steps с уникальными StepIds.
+- Корневой mapping содержит необязательный `parameters` и обязательный `steps`; `parameters` является mapping уникальных ParameterIds в единственное поддерживаемое значение `string`, а `steps` — непустая упорядоченная последовательность Steps с уникальными StepIds.
 
 - Step является mapping со следующими полями:
   - `id`: обязательный StepId;
   - `agent`: необязательный AgentId; при отсутствии используется `default-agent`;
   - `prompt`: необязательный PromptId;
+  - `process`: необязательный Process mapping с обязательными `executable` и `args`, необязательными `cwd` и `stdout`; `executable` и `cwd` являются строками, `args` — последовательностью строк, `stdout` — InputId из `outputs`;
   - `human`: обязательный boolean;
   - `depends-on`: обязательная последовательность уникальных StepIds; может быть пустой;
   - `outputs`: обязательная последовательность уникальных InputIds; может быть пустой.
 
-- Других полей Step нет. `depends-on` описывает зависимости только от Steps, а не от отдельных artifacts.
+- Других полей Step нет. Step без `process` является Agent Step и разрешает Agent через `agent` либо `default-agent`; Step с `process` является Process Step, запрещает `agent`, `prompt` и `human: true` и не требует default Agent.
+- Process `executable` не содержит placeholders; абсолютный путь используется напрямую, относительный путь с `/` разрешается относительно `cwd`, а имя без `/` разрешается через `PATH` команды `start` или preflight-команды; результат обязан указывать на executable regular file.
+- Process `cwd` не содержит placeholders; отсутствующий или относительный `cwd` разрешается относительно current working directory команды, а materialized значение всегда является абсолютным путём существующего directory.
+- `depends-on` описывает зависимости только от Steps, а не от отдельных artifacts.
 - Каждый InputId в `outputs` объявляет один обязательный artifact успешного attempt этого Step.
 - Например:
 ```yaml
@@ -93,11 +63,25 @@ steps:
     outputs:
       - source
 ```
+
+- Например Process Step и run parameter:
+```yaml
+parameters:
+  mode: string
+steps:
+  - id: convert
+    process:
+      executable: converter
+      args: ["--mode", "{{param:mode}}", "--input", "{{path:download:source}}", "--output", "{{output:result}}"]
+    human: false
+    depends-on: [download]
+    outputs: [result]
+```
 - Ссылочная целостность, cycles, reachability и семантика зависимостей заданы в `workflow.spec.md`.
 
 ## Prompt template
 
-- Prompt template находится в `prompt/<prompt-id>.md` и является произвольным UTF-8 Markdown. YAML-декодирование к нему не применяется.
+- Prompt template является произвольным UTF-8 Markdown. YAML-декодирование к нему не применяется.
 - В тексте разрешены ровно два вида placeholders:
   - `{{path:<step-id>:<input-id>}}` заменяется абсолютным путём к выбранной версии artifact;
   - `{{content:<step-id>:<input-id>}}` заменяется содержимым выбранной версии artifact без дополнительного экранирования.
@@ -107,23 +91,18 @@ steps:
 - Неизвестный вид placeholder, неизвестная пара или незакрытый `{{` делают template невалидным.
 - Если artifact для `content` не является UTF-8, prompt нельзя сформировать и текущая команда завершается fail-fast до запуска агента.
 - Prompt template первого описанного Step не может содержать placeholders любого вида.
-- Prompt catalog вычисляет `bytes` из полностью прочитанного UTF-8 содержимого файла, поэтому значение равно размеру template в bytes, а не числу Unicode symbols.
-- Workflow show требует source YAML schema с непустым `steps`, уникальными валидными StepId, валидными необязательными AgentId и PromptId, валидными и уникальными значениями `depends-on` и `outputs`, но не требует существования referenced Steps, Agents, prompts или artifacts.
-- Prompt show вычисляет `bytes` по точному UTF-8 содержимому выбранного template и сохраняет `content` вместе с наличием или отсутствием финального newline.
+- Workflow show требует source YAML schema с валидными ParameterIds, непустым `steps`, уникальными валидными StepId, структурно валидным Agent либо Process executor, валидными и уникальными значениями `depends-on` и `outputs` и синтаксически валидными Process placeholders, но не разрешает executable и не требует существования referenced Steps, Agents, prompts, parameters или artifacts.
 
 ## Materialized workflow
 
 - До резервирования RunId source workflow, Agents, prompt templates и эффективный `max-parallel-agents` materialize’ятся только в кандидат snapshot в памяти; после атомарного резервирования каталога run и получения Run lock команда `start` durable-публикует проверенный кандидат в YAML-файл `run/<run-id>/spec.yaml` с фиксированным именем.
-- Корневой mapping содержит ровно `workflow-id` со значением WorkflowId source workflow, положительный integer `max-parallel-agents` с эффективным значением config на момент `start` и `steps` с исходным порядком Steps.
+- Корневой mapping содержит ровно `workflow-id`, `max-parallel-agents`, `parameters` и `steps`; `parameters` хранит mapping всех объявленных ParameterIds в точные UTF-8 значения без NUL, выбранные `start`, включая пустые строки.
 
-- Каждый materialized Step содержит ровно следующие поля:
-  - `id`, `human`, `depends-on` и `outputs` со значениями source Step;
-  - `agent`: Agent mapping с полями `type`, `model` и `reasoning`, целиком скопированный из выбранного явным полем или default Agent;
-  - `prompt`: `null`, если template не указан, иначе строка с полным содержимым `.md` файла, включая неизменённые placeholders; при запуске `null` формирует пустую UTF-8 строку prompt без fallback или default.
+- Каждый materialized Step содержит `id`, `human`, `depends-on`, `outputs`, `agent`, `prompt` и `process`; Agent Step хранит materialized `agent`, точный `prompt` либо `null` и `process: null`, Process Step хранит `agent: null`, `prompt: null` и Process mapping с абсолютными `executable` и `cwd`, неизменными `args` и `stdout`.
 
-- Materialization добавляет `workflow-id` и эффективный `max-parallel-agents`, заменяет ссылки `agent` и `prompt` их значениями и сериализует кандидат как YAML без записи в run; другой обработки содержимого нет.
+- Materialization добавляет `workflow-id`, effective parameters и `max-parallel-agents`, заменяет ссылки `agent` и `prompt` их значениями, разрешает Process executable и cwd и сериализует кандидат как YAML без записи в run; Process argv placeholders до запуска attempt сохраняются неизменными.
 - Materialized workflow не содержит AgentId, PromptId или ссылок на изменяемые config, workflow и prompt files.
-- JSON workflow plan представляет тот же materialized кандидат с snake_case полями `workflow_id`, `max_parallel_agents` и `steps`; каждый Step содержит Agent object `{type,model,reasoning}`, точный `prompt` либо `null`, `human`, `depends_on` и `outputs`, но этот object не является durable-файлом.
+- JSON workflow plan представляет validated кандидат без runtime parameter values с snake_case полями `workflow_id`, `max_parallel_agents`, `parameters` и `steps`; `parameters` содержит ParameterIds, каждый Step содержит nullable `agent`, nullable `prompt`, nullable Process object `{executable,args,cwd,stdout}`, `human`, `depends_on` и `outputs`, но этот object не является durable-файлом.
 - Durable-публикация `spec.yaml` выполняется атомарно после резервирования run и до публикации первого Agent attempt; после публикации файл неизменяем.
 
 ## Agent attempt record

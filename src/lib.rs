@@ -11,10 +11,10 @@ pub use agent::{
     AttemptControl, BuiltinAgentRegistry, ProcessAgentRegistry, TerminationSignal,
 };
 pub use catalog::{
-    AgentCatalogEntry, PromptCatalogEntry, PromptTemplate, SourceWorkflow, SourceWorkflowStep,
-    WorkflowCatalogEntry, execute_agent_list, execute_agent_show, execute_prompt_list,
-    execute_prompt_show, execute_workflow_list, execute_workflow_show, list_agents, list_prompts,
-    list_workflows, show_agent, show_prompt, show_workflow,
+    AgentCatalogEntry, PromptCatalogEntry, PromptTemplate, SourceWorkflow, SourceWorkflowProcess,
+    SourceWorkflowStep, WorkflowCatalogEntry, execute_agent_list, execute_agent_show,
+    execute_prompt_list, execute_prompt_show, execute_workflow_list, execute_workflow_show,
+    list_agents, list_prompts, list_workflows, show_agent, show_prompt, show_workflow,
 };
 pub use config::{CommandError, ConfigCommand, ConfigKey, ProcessEnvironment, execute_config};
 pub use run::{
@@ -28,8 +28,8 @@ pub use run::{
 };
 pub use workflow::{
     ValidateCommand, WorkflowGraph, WorkflowGraphEdge, WorkflowPlan, WorkflowPlanAgent,
-    WorkflowPlanStep, WorkflowValidation, WorkflowValidationReport, build_workflow_graph,
-    build_workflow_plan, build_workflow_plan_with_registry, execute_validate, execute_validate_all,
-    execute_validate_with_registry, execute_workflow_graph, execute_workflow_plan,
-    validate_all_workflows, validate_all_workflows_with_registry,
+    WorkflowPlanProcess, WorkflowPlanStep, WorkflowValidation, WorkflowValidationReport,
+    build_workflow_graph, build_workflow_plan, build_workflow_plan_with_registry, execute_validate,
+    execute_validate_all, execute_validate_with_registry, execute_workflow_graph,
+    execute_workflow_plan, validate_all_workflows, validate_all_workflows_with_registry,
 };

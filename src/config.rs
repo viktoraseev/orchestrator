@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
 
 use crate::agent::{AgentRegistry, BuiltinAgentRegistry};
@@ -16,13 +16,17 @@ use crate::agent::{AgentRegistry, BuiltinAgentRegistry};
 const DEFAULT_MAX_PARALLEL_AGENTS: usize = 5;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Переменные процесса, влияющие на разрешение корня состояния.
+/// Снимок process environment для разрешения state root и Process Step.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProcessEnvironment {
     /// Значение `HOME`, если оно присутствует в окружении.
     pub home: Option<OsString>,
     /// Значение `ORC_HOME`, если оно присутствует в окружении.
     pub orc_home: Option<OsString>,
+    /// Текущий рабочий каталог lifecycle-команды для materialization Process Step.
+    pub current_dir: Option<PathBuf>,
+    /// Значение `PATH` для разрешения Process executable без `/`.
+    pub path: Option<OsString>,
 }
 
 /// Поддерживаемый ключ публичных config-команд.
@@ -32,7 +36,7 @@ pub enum ConfigKey {
     DefaultWorkflow,
     /// Agent, выбираемый Step без явного Agent ID.
     DefaultAgent,
-    /// Общий лимит одновременно работающих процессов агентов.
+    /// Общий лимит одновременно работающих Agent и Process executors.
     MaxParallelAgents,
 }
 
@@ -43,7 +47,7 @@ pub enum ConfigCommand {
     Get(ConfigKey),
     /// Прочитать все эффективные значения в стабильном порядке.
     List,
-    /// Атомарно заменить общий лимит процессов агентов.
+    /// Атомарно заменить общий лимит Agent и Process executors.
     SetMaxParallelAgents(NonZeroUsize),
     /// Атомарно выбрать существующий workflow template по умолчанию.
     SetDefaultWorkflow(WorkflowId),
@@ -188,9 +192,17 @@ impl CommandError {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct RawConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) default_workflow: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) default_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_parallel_agents: Option<usize>,
@@ -201,9 +213,35 @@ pub(crate) struct RawConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawAgent {
+    #[serde(deserialize_with = "deserialize_string")]
     pub(crate) r#type: String,
+    #[serde(deserialize_with = "deserialize_string")]
     pub(crate) model: String,
+    #[serde(deserialize_with = "deserialize_string")]
     pub(crate) reasoning: String,
+}
+
+fn deserialize_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match serde_yaml::Value::deserialize(deserializer)? {
+        serde_yaml::Value::String(value) => Ok(value),
+        value => Err(de::Error::custom(format!("expected string, got {value:?}"))),
+    }
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<serde_yaml::Value>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(serde_yaml::Value::String(value)) => Ok(Some(value)),
+        Some(value) => Err(de::Error::custom(format!(
+            "expected string or null, got {value:?}"
+        ))),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

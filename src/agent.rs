@@ -119,11 +119,11 @@ impl AgentCancellation {
         self.0.escalate.store(true, Ordering::Release);
     }
 
-    fn signal(&self) -> Option<TerminationSignal> {
+    pub(crate) fn signal(&self) -> Option<TerminationSignal> {
         TerminationSignal::from_number(self.0.signal.load(Ordering::Acquire))
     }
 
-    fn should_escalate(&self) -> bool {
+    pub(crate) fn should_escalate(&self) -> bool {
         self.0.escalate.load(Ordering::Acquire)
     }
 }
@@ -577,32 +577,39 @@ fn wait_for_process(
     child: &mut Child,
     request: &AgentRunRequest<'_>,
 ) -> Result<ExitStatus, String> {
+    wait_for_child(
+        child,
+        &format!("Agent type '{}'", request.type_id),
+        request.cancellation,
+    )
+}
+
+pub(crate) fn wait_for_child(
+    child: &mut Child,
+    label: &str,
+    cancellation: &AgentCancellation,
+) -> Result<ExitStatus, String> {
     let mut termination_deadline = None;
     loop {
-        if let Some(status) = child.try_wait().map_err(|error| {
-            format!(
-                "не удалось наблюдать Agent type '{}': {error}",
-                request.type_id
-            )
-        })? {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("не удалось наблюдать {label}: {error}"))?
+        {
             return Ok(status);
         }
-        if let Some(signal) = request.cancellation.signal()
+        if let Some(signal) = cancellation.signal()
             && termination_deadline.is_none()
         {
             signal_process_group(child.id(), signal.name())?;
             termination_deadline = Some(Instant::now() + Duration::from_secs(10));
         }
-        if request.cancellation.should_escalate()
+        if cancellation.should_escalate()
             || termination_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
             signal_process_group(child.id(), "KILL")?;
-            return child.wait().map_err(|error| {
-                format!(
-                    "не удалось дождаться Agent type '{}': {error}",
-                    request.type_id
-                )
-            });
+            return child
+                .wait()
+                .map_err(|error| format!("не удалось дождаться {label}: {error}"));
         }
         thread::park_timeout(Duration::from_millis(10));
     }

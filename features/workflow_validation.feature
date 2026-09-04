@@ -36,6 +36,9 @@ Feature: Validation workflow
         | повторяющийся depends-on          | depends-on содержит повтор |
         | повторяющийся output              | outputs содержит повтор |
         | невалидный StepId                 | не соответствует kebab-case |
+        | невалидный ParameterId с точкой   | не соответствует kebab-case |
+        | невалидный InputId с точкой       | не соответствует kebab-case |
+        | невалидный PromptId с точкой      | не соответствует kebab-case |
         | синтаксически невалидный YAML      | невалидный workflow     |
 
   @workflow:validation @format:config-yaml

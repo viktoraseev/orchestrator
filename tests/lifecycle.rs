@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Barrier, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cucumber::{World, given, then, when};
 use orchestrator::{
@@ -32,6 +32,7 @@ struct LifecycleWorld {
     shutdown_elapsed: Option<Duration>,
     agent_type: Option<String>,
     protocol_case: Option<String>,
+    start_window_ms: Option<(u128, u128)>,
 }
 
 #[given(expr = "подготовлен single-step workflow для Agent type {word}")]
@@ -930,15 +931,17 @@ fn resume_human_with_terminal(world: &mut LifecycleWorld) {
     world.observed = Some(observe(result, reporter));
 }
 
-#[when("Agent активирует sessions a, b, a, a и возвращается без completion")]
-fn activate_sessions(world: &mut LifecycleWorld) {
+#[when(
+    "Agent активирует opaque sessions vendor/a:1, vendor/b:2, vendor/a:1, vendor/a:1 и возвращается без completion"
+)]
+fn activate_opaque_sessions(world: &mut LifecycleWorld) {
     run_start(
         world,
         [Behavior::Activate(vec![
-            "a".to_owned(),
-            "b".to_owned(),
-            "a".to_owned(),
-            "a".to_owned(),
+            "vendor/a:1".to_owned(),
+            "vendor/b:2".to_owned(),
+            "vendor/a:1".to_owned(),
+            "vendor/a:1".to_owned(),
         ])],
     );
 }
@@ -1533,14 +1536,14 @@ fn shutdown_waited_ten_seconds(world: &mut LifecycleWorld) {
     );
 }
 
-#[then("resume запускает тот же attempt 0 с session a")]
+#[then("resume запускает тот же attempt 0 с session vendor/a:1")]
 fn resumed_same_attempt(world: &mut LifecycleWorld) {
     assert_eq!(
         world.calls,
         vec![Call {
             step_id: "first".to_owned(),
             attempt: 0,
-            resume_session: Some("a".to_owned()),
+            resume_session: Some("vendor/a:1".to_owned()),
             inputs: Vec::new(),
             prompt: String::new(),
             human: false,
@@ -1550,15 +1553,29 @@ fn resumed_same_attempt(world: &mut LifecycleWorld) {
     );
 }
 
-#[then("durable activations равны a, b, a")]
-fn durable_activations(world: &mut LifecycleWorld) {
+#[then("durable activations равны vendor/a:1, vendor/b:2, vendor/a:1")]
+fn durable_opaque_activations(world: &mut LifecycleWorld) {
     let text = fs::read_to_string(run_directory(world).join("0.first.attempt.yaml"))
         .expect("attempt record must be readable");
     let sessions: Vec<&str> = text
         .lines()
         .filter_map(|line| line.strip_prefix("  session-id: "))
         .collect();
-    assert_eq!(sessions, ["a", "b", "a"]);
+    assert_eq!(sessions, ["vendor/a:1", "vendor/b:2", "vendor/a:1"]);
+}
+
+#[then("RunId является десятичным Unix timestamp создания в миллисекундах")]
+fn run_id_is_creation_timestamp_ms(world: &mut LifecycleWorld) {
+    let run_id = world
+        .run_id
+        .as_deref()
+        .expect("scenario must create a run")
+        .parse::<u128>()
+        .expect("RunId must be decimal");
+    let (started, finished) = world
+        .start_window_ms
+        .expect("scenario must capture the start time window");
+    assert!((started..=finished).contains(&run_id));
 }
 
 #[then("durable activations равны process-session")]
@@ -2216,6 +2233,7 @@ fn run_start_with_terminal(
     let root = world.root.as_ref().expect("scenario must define root");
     let registry = FakeAgentRegistry::new(root.path().to_owned(), behaviors);
     let mut reporter = VecReporter::default();
+    let started = unix_time_ms();
     let result = execute_lifecycle(
         &LifecycleCommand::start_explicit("delivery").expect("workflow ID must be valid"),
         &environment(root),
@@ -2224,6 +2242,8 @@ fn run_start_with_terminal(
         &registry,
         &mut reporter,
     );
+    let finished = unix_time_ms();
+    world.start_window_ms = Some((started, finished));
     world.run_id = reporter
         .0
         .iter()
@@ -2235,6 +2255,13 @@ fn run_start_with_terminal(
         .into_inner()
         .expect("call log must be available");
     world.observed = Some(observe(result, reporter));
+}
+
+fn unix_time_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time must be after Unix epoch")
+        .as_millis()
 }
 
 fn observe(result: Result<(), orchestrator::CommandError>, reporter: VecReporter) -> Observed {
@@ -2253,6 +2280,8 @@ fn environment(root: &TempDir) -> ProcessEnvironment {
     ProcessEnvironment {
         home: None,
         orc_home: Some(root.path().as_os_str().to_owned()),
+        current_dir: None,
+        path: None,
     }
 }
 

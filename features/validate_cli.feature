@@ -22,6 +22,12 @@ Feature: CLI validate
       Then validation завершается с кодом 4
       And diagnostics начинается с "error: validate:"
 
+    Scenario: Больше одного WorkflowId отклоняется CLI parser
+      Given подготовлен кандидат workflow "линейный graph с обоими видами placeholders"
+      When запускается orchestrator validate delivery extra
+      Then validation завершается с кодом 2
+      And diagnostics начинается с "error:"
+
   @cli:validate @cli:выбор-workflow @process
   Rule: Validate без аргумента выбирает только default-workflow
 

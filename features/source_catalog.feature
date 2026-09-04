@@ -8,14 +8,24 @@ Feature: Read-only catalogs source definitions
       When workflow catalog строится через публичный API
       Then catalog завершается с кодом 0
       And catalog output пуст
+      When запускается orchestrator workflow list в JSON
+      Then catalog завершается с кодом 0
+      And JSON catalog равен пустому array
 
     @process
     Scenario: Workflow templates сортируются и имеют абсолютные paths в JSON
       Given подготовлены workflow templates beta и alpha с посторонними entries
       When запускается orchestrator workflow list в JSON
       Then catalog завершается с кодом 0
-      And JSON workflow catalog содержит alpha и beta по порядку
+      And JSON workflow catalog равен alpha и beta с absolute paths по порядку
       And catalog не изменил source state
+
+    @process
+    Scenario: Workflow text catalog содержит только ID по порядку
+      Given подготовлены workflow templates beta и alpha с посторонними entries
+      When запускается orchestrator workflow list
+      Then catalog завершается с кодом 0
+      And workflow catalog text равен строкам alpha и beta
 
     @process
     Scenario: Невалидный WorkflowId contract file не даёт partial stdout
@@ -24,22 +34,43 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
+    @process
+    Scenario: Workflow contract path обязан быть regular file
+      Given подготовлен workflow contract path, который является directory
+      When запускается orchestrator workflow list
+      Then catalog завершается с кодом 3
+      And catalog output пуст
+
   @spec:source-catalogs @format:config-yaml @cli:source-catalogs
   Rule: Agent catalog использует полную config validation
+
+    @process
+    Scenario: Отсутствующий config даёт пустой Agent catalog
+      Given подготовлен пустой source catalog root
+      When запускается orchestrator agent list в JSON
+      Then catalog завершается с кодом 0
+      And JSON catalog равен пустому array
 
     Scenario: Typed Agent catalog сохраняет параметры named Agents
       Given подготовлен config с Agents beta и alpha
       When Agent catalog строится через публичный API
       Then catalog завершается с кодом 0
-      And typed Agent catalog содержит alpha и beta по порядку
+      And typed Agent catalog равен alpha codex gpt high и beta claude opus high по порядку
 
     @process
     Scenario: Agent text renderer детерминирован
       Given подготовлен config с Agents beta и alpha
       When запускается orchestrator agent list
       Then catalog завершается с кодом 0
-      And Agent catalog text содержит обе validated записи по порядку
+      And Agent catalog text равен строкам alpha codex gpt high и beta claude opus high
       And catalog не изменил source state
+
+    @process
+    Scenario: Agent JSON catalog имеет стабильную schema
+      Given подготовлен config с Agents beta и alpha
+      When запускается orchestrator agent list в JSON
+      Then catalog завершается с кодом 0
+      And JSON Agent catalog равен alpha codex gpt high и beta claude opus high по порядку
 
     @process
     Scenario: Невалидный скрытый config field не даёт partial stdout
@@ -52,22 +83,53 @@ Feature: Read-only catalogs source definitions
   Rule: Prompt catalog полностью читает UTF-8 templates
 
     Scenario: Typed prompt catalog считает UTF-8 bytes
-      Given подготовлен prompt template unicode
+      Given подготовлен prompt template unicode с содержимым Привет
       When prompt catalog строится через публичный API
       Then catalog завершается с кодом 0
-      And typed prompt unicode имеет документированный размер bytes
+      And typed prompt unicode имеет размер 12 bytes
 
     @process
     Scenario: Prompt JSON catalog сортируется и игнорирует temporary entries
       Given подготовлены prompt templates beta и alpha с temporary entry
       When запускается orchestrator prompt list в JSON
       Then catalog завершается с кодом 0
-      And JSON prompt catalog содержит alpha и beta по порядку
+      And JSON prompt catalog равен alpha 10 bytes и beta 4 bytes с absolute paths по порядку
       And catalog не изменил source state
+
+    @process
+    Scenario: Prompt text catalog имеет стабильную форму
+      Given подготовлены prompt templates beta и alpha с temporary entry
+      When запускается orchestrator prompt list
+      Then catalog завершается с кодом 0
+      And prompt catalog text равен alpha 10 bytes и beta 4 bytes с absolute paths по порядку
+
+    @process
+    Scenario: Отсутствующий prompt catalog успешен в обоих форматах
+      Given подготовлен пустой source catalog root
+      When запускается orchestrator prompt list
+      Then catalog завершается с кодом 0
+      And catalog output пуст
+      When запускается orchestrator prompt list в JSON
+      Then catalog завершается с кодом 0
+      And JSON catalog равен пустому array
 
     @process
     Scenario: Non-UTF-8 prompt не даёт partial stdout
       Given подготовлен non-UTF-8 prompt template
+      When запускается orchestrator prompt list
+      Then catalog завершается с кодом 3
+      And catalog output пуст
+
+    @process
+    Scenario: Prompt contract file требует валидный PromptId в basename
+      Given подготовлен prompt contract file с невалидным ID
+      When запускается orchestrator prompt list
+      Then catalog завершается с кодом 3
+      And catalog output пуст
+
+    @process
+    Scenario: Prompt contract path обязан быть regular file
+      Given подготовлен prompt contract path, который является directory
       When запускается orchestrator prompt list
       Then catalog завершается с кодом 3
       And catalog output пуст
@@ -110,6 +172,13 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 4
       And catalog output пуст
 
+    @process
+    Scenario: Невалидный WorkflowId отклоняется до filesystem lookup
+      Given подготовлен пустой source catalog root
+      When запускается orchestrator workflow show с невалидным ID
+      Then catalog завершается с кодом 2
+      And catalog output пуст
+
   @spec:source-catalogs @format:config-yaml @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Agent show выбирает Agent только после полной config validation
 
@@ -117,14 +186,14 @@ Feature: Read-only catalogs source definitions
       Given подготовлен config с Agents beta и alpha
       When Agent alpha читается через публичный API
       Then catalog завершается с кодом 0
-      And typed Agent show содержит alpha
+      And typed Agent show равен alpha codex gpt high
 
     @process
     Scenario: Agent show JSON возвращает один object
       Given подготовлен config с Agents beta и alpha
       When запускается orchestrator agent show beta в JSON
       Then catalog завершается с кодом 0
-      And JSON Agent show содержит beta
+      And JSON Agent show равен beta claude opus high
       And catalog не изменил source state
 
     @process
@@ -132,7 +201,7 @@ Feature: Read-only catalogs source definitions
       Given подготовлен config с Agents beta и alpha
       When запускается orchestrator agent show alpha
       Then catalog завершается с кодом 0
-      And Agent show text содержит выбранную запись
+      And Agent show text равен строке agent alpha: type=codex model=gpt reasoning=high
 
     @process
     Scenario: Невалидный AgentId отклоняется до чтения повреждённого config
@@ -191,4 +260,11 @@ Feature: Read-only catalogs source definitions
       Given подготовлен пустой source catalog root
       When запускается orchestrator prompt show missing
       Then catalog завершается с кодом 4
+      And catalog output пуст
+
+    @process
+    Scenario: Невалидный PromptId отклоняется до чтения повреждённого соседа
+      Given подготовлен prompt demo без финального newline и повреждённый соседний template
+      When запускается orchestrator prompt show с невалидным ID
+      Then catalog завершается с кодом 2
       And catalog output пуст

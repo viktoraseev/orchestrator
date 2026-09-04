@@ -7,7 +7,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -19,10 +21,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{
     AgentCancellation, AgentInput, AgentRegistry, AgentRunRequest, AttemptControl,
-    BuiltinAgentRegistry, TerminationSignal,
+    BuiltinAgentRegistry, TerminationSignal, wait_for_child,
 };
 use crate::config::{CommandError, ProcessEnvironment, RawAgent, resolve_state_root};
-use crate::workflow::{ValidateCommand, Workflow, materialize_for_lifecycle};
+use crate::workflow::{SymbolicId, ValidateCommand, Workflow, materialize_for_lifecycle};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const INSPECTION_SNAPSHOT_ATTEMPTS: usize = 4;
@@ -32,7 +34,12 @@ const INSPECTION_WATCH_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LifecycleCommand {
     /// Создать новый run выбранного workflow.
-    Start(ValidateCommand),
+    Start {
+        /// Способ выбора source workflow.
+        selection: ValidateCommand,
+        /// Явные значения объявленных run parameters.
+        parameters: BTreeMap<String, String>,
+    },
     /// Продолжить существующий run с обязательным ID.
     Resume(RunId),
 }
@@ -85,8 +92,23 @@ impl LifecycleCommand {
     ///
     /// Возвращает [`CommandError::Syntax`], если `WorkflowId` не соответствует kebab-case.
     pub fn start_explicit(value: &str) -> Result<Self, CommandError> {
+        Self::start_explicit_with_parameters(value, BTreeMap::new())
+    }
+
+    /// Создаёт `start` с явно выбранным workflow и run parameters.
+    ///
+    /// # Errors
+    ///
+    /// Возвращает [`CommandError::Syntax`], если `WorkflowId` не соответствует kebab-case.
+    pub fn start_explicit_with_parameters(
+        value: &str,
+        parameters: BTreeMap<String, String>,
+    ) -> Result<Self, CommandError> {
         ValidateCommand::explicit(value)
-            .map(Self::Start)
+            .map(|selection| Self::Start {
+                selection,
+                parameters,
+            })
             .map_err(|error| match error {
                 CommandError::Syntax { context } => CommandError::Syntax {
                     context: context.replacen("validate:", "start:", 1),
@@ -98,7 +120,21 @@ impl LifecycleCommand {
     /// Создаёт `start` с workflow из config default.
     #[must_use]
     pub const fn start_configured_default() -> Self {
-        Self::Start(ValidateCommand::ConfiguredDefault)
+        Self::Start {
+            selection: ValidateCommand::ConfiguredDefault,
+            parameters: BTreeMap::new(),
+        }
+    }
+
+    /// Создаёт `start` с workflow из config default и run parameters.
+    #[must_use]
+    pub const fn start_configured_default_with_parameters(
+        parameters: BTreeMap<String, String>,
+    ) -> Self {
+        Self::Start {
+            selection: ValidateCommand::ConfiguredDefault,
+            parameters,
+        }
     }
 }
 
@@ -395,13 +431,13 @@ pub trait LifecycleReporter {
     fn line(&mut self, value: &str) -> Result<(), std::io::Error>;
 }
 
-/// Выполняет `start` или `resume` через одну lifecycle, storage и `AgentType` границу.
+/// Выполняет `start` или `resume` через одну lifecycle, storage и Step executor границу.
 ///
 /// См. Rules в `features/lifecycle.feature`; storage commit attempt состоит в атомарной замене record, а `resume` читает только полностью опубликованную durable-модель.
 ///
 /// # Errors
 ///
-/// Возвращает категории 2/3/4 до создания run, 5 для занятого run и 1 для I/O, Agent failure или возврата без completion.
+/// Возвращает категории 2/3/4 до создания run, 5 для занятого run и 1 для I/O, executor failure или возврата Agent без completion.
 pub fn execute_lifecycle(
     command: &LifecycleCommand,
     environment: &ProcessEnvironment,
@@ -411,8 +447,12 @@ pub fn execute_lifecycle(
     reporter: &mut dyn LifecycleReporter,
 ) -> Result<(), CommandError> {
     match command {
-        LifecycleCommand::Start(selection) => start(
+        LifecycleCommand::Start {
             selection,
+            parameters,
+        } => start(
+            selection,
+            parameters,
             environment,
             terminal,
             signals,
@@ -886,6 +926,8 @@ pub fn open_run_artifact(
 struct MaterializedWorkflow {
     workflow_id: String,
     max_parallel_agents: usize,
+    #[serde(default)]
+    parameters: BTreeMap<String, String>,
     steps: Vec<MaterializedStep>,
 }
 
@@ -893,18 +935,29 @@ struct MaterializedWorkflow {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct MaterializedStep {
     id: String,
-    agent: RawAgent,
+    agent: Option<RawAgent>,
     prompt: Option<String>,
     human: bool,
+    process: Option<MaterializedProcess>,
     depends_on: Vec<String>,
     outputs: Vec<String>,
 }
 
-impl From<Workflow> for MaterializedWorkflow {
-    fn from(workflow: Workflow) -> Self {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MaterializedProcess {
+    executable: PathBuf,
+    args: Vec<String>,
+    cwd: PathBuf,
+    stdout: Option<String>,
+}
+
+impl MaterializedWorkflow {
+    fn from_workflow(workflow: Workflow, parameters: BTreeMap<String, String>) -> Self {
         Self {
             workflow_id: workflow.id.as_str().to_owned(),
             max_parallel_agents: workflow.max_parallel_agents,
+            parameters,
             steps: workflow
                 .steps
                 .into_iter()
@@ -913,6 +966,12 @@ impl From<Workflow> for MaterializedWorkflow {
                     agent: step.agent,
                     prompt: step.prompt,
                     human: step.human,
+                    process: step.process.map(|process| MaterializedProcess {
+                        executable: process.executable,
+                        args: process.args,
+                        cwd: process.cwd,
+                        stdout: process.stdout.map(|id| id.as_str().to_owned()),
+                    }),
                     depends_on: step
                         .depends_on
                         .into_iter()
@@ -1023,8 +1082,43 @@ impl RunGuard {
     }
 }
 
+fn validate_run_parameters(
+    declared: &[SymbolicId],
+    provided: &BTreeMap<String, String>,
+) -> Result<(), CommandError> {
+    if let Some(parameter) = provided
+        .iter()
+        .find_map(|(id, value)| value.contains('\0').then_some(id))
+    {
+        return Err(CommandError::Invalid {
+            context: format!("start: значение ParameterId '{parameter}' содержит NUL"),
+        });
+    }
+    if let Some(parameter) = declared
+        .iter()
+        .find(|id| !provided.contains_key(id.as_str()))
+    {
+        return Err(CommandError::Invalid {
+            context: format!(
+                "start: обязательный ParameterId '{}' не передан",
+                parameter.as_str()
+            ),
+        });
+    }
+    if let Some(parameter) = provided
+        .keys()
+        .find(|id| !declared.iter().any(|declared| declared.as_str() == *id))
+    {
+        return Err(CommandError::Invalid {
+            context: format!("start: ParameterId '{parameter}' не объявлен workflow"),
+        });
+    }
+    Ok(())
+}
+
 fn start(
     selection: &ValidateCommand,
+    parameters: &BTreeMap<String, String>,
     environment: &ProcessEnvironment,
     terminal: TerminalMode,
     signals: &LifecycleSignals,
@@ -1032,12 +1126,9 @@ fn start(
     reporter: &mut dyn LifecycleReporter,
 ) -> Result<(), CommandError> {
     let root = resolve_state_root(environment, "start")?;
-    let candidate = MaterializedWorkflow::from(materialize_for_lifecycle(
-        selection,
-        environment,
-        registry,
-        "start",
-    )?);
+    let workflow = materialize_for_lifecycle(selection, environment, registry, "start")?;
+    validate_run_parameters(&workflow.parameters, parameters)?;
+    let candidate = MaterializedWorkflow::from_workflow(workflow, parameters.clone());
     let (run_id, guard) = reserve_run(&root)?;
     publish_yaml(&guard.directory, "spec.yaml", &candidate, "start")?;
     let first = candidate
@@ -1148,6 +1239,15 @@ fn run_current_attempt(
             "attempt ссылается на отсутствующий materialized Step",
         )
     })?;
+    if let Some(process) = &step.process {
+        return run_process_attempt(execution, attempt, step, process);
+    }
+    let agent = step.agent.as_ref().ok_or_else(|| {
+        invalid_run(
+            run_id,
+            "materialized Step не содержит ни Agent, ни Process executor",
+        )
+    })?;
     let state = Arc::new(Mutex::new(ControlState {
         active: true,
         run_id,
@@ -1168,9 +1268,9 @@ fn run_current_attempt(
     let result = registry.run(
         &AgentRunRequest {
             step_id: &step.id,
-            type_id: &step.agent.r#type,
-            model: &step.agent.model,
-            reasoning: &step.agent.reasoning,
+            type_id: &agent.r#type,
+            model: &agent.model,
+            reasoning: &agent.reasoning,
             prompt: &prompt,
             inputs: &inputs,
             resume_session: attempt.record.last_session(),
@@ -1212,6 +1312,277 @@ fn run_current_attempt(
             context: format!("run {run_id}: невалидный /exit outcome Agent type"),
             source: std::io::Error::other("unexpected Agent user exit"),
         }),
+    }
+}
+
+fn run_process_attempt(
+    execution: &AttemptExecution<'_>,
+    attempt: &DurableAttempt,
+    step: &MaterializedStep,
+    process: &MaterializedProcess,
+) -> Result<AttemptOutcome, CommandError> {
+    let (inputs, _) = prepare_agent_input(
+        &execution.guard.directory,
+        execution.workflow,
+        attempt,
+        execution.run_id,
+    )?;
+    let output_paths = process_output_paths(
+        &execution.guard.directory,
+        attempt.number,
+        step,
+        execution.run_id,
+    )?;
+    let args = process
+        .args
+        .iter()
+        .map(|argument| {
+            render_process_argument(
+                argument,
+                &execution.workflow.parameters,
+                &inputs,
+                &output_paths,
+                execution.run_id,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut command = build_process_command(
+        execution,
+        attempt,
+        step,
+        process,
+        &args,
+        &inputs,
+        &output_paths,
+    )?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(source) => {
+            cleanup_process_outputs(&output_paths);
+            return Err(CommandError::Runtime {
+                context: format!(
+                    "run {}: не удалось запустить Process '{}'",
+                    execution.run_id,
+                    process.executable.display()
+                ),
+                source,
+            });
+        }
+    };
+    let status = match wait_for_child(&mut child, "Process", execution.cancellation) {
+        Ok(status) => status,
+        Err(context) => {
+            cleanup_process_outputs(&output_paths);
+            return Err(CommandError::Runtime {
+                context: format!("run {}: {context}", execution.run_id),
+                source: std::io::Error::other("Process supervision failure"),
+            });
+        }
+    };
+    if !status.success() {
+        cleanup_process_outputs(&output_paths);
+        return Err(CommandError::Runtime {
+            context: format!(
+                "run {}: Process завершился с кодом {}",
+                execution.run_id,
+                status
+                    .code()
+                    .map_or_else(|| "signal".to_owned(), |code| code.to_string())
+            ),
+            source: std::io::Error::other("Process failure"),
+        });
+    }
+    let candidate = read_process_outputs(execution.run_id, step, &output_paths);
+    cleanup_process_outputs(&output_paths);
+    let candidate = candidate?;
+    let _storage = lock_storage(&execution.hub.storage)?;
+    finalize_completion(&execution.guard.directory, attempt.number, step, candidate)?;
+    Ok(AttemptOutcome::Returned(true))
+}
+
+fn build_process_command(
+    execution: &AttemptExecution<'_>,
+    attempt: &DurableAttempt,
+    step: &MaterializedStep,
+    process: &MaterializedProcess,
+    args: &[String],
+    inputs: &[AgentInput],
+    output_paths: &BTreeMap<String, PathBuf>,
+) -> Result<Command, CommandError> {
+    let inputs = serde_yaml::to_string(inputs).map_err(|source| CommandError::Runtime {
+        context: format!(
+            "run {}: не удалось сериализовать Process inputs",
+            execution.run_id
+        ),
+        source: std::io::Error::other(source),
+    })?;
+    let outputs = serde_yaml::to_string(output_paths).map_err(|source| CommandError::Runtime {
+        context: format!(
+            "run {}: не удалось сериализовать Process outputs",
+            execution.run_id
+        ),
+        source: std::io::Error::other(source),
+    })?;
+    let mut command = Command::new(&process.executable);
+    command
+        .args(args)
+        .current_dir(&process.cwd)
+        .env("ORC_STEP_ID", &step.id)
+        .env("ORC_RUN_ID", execution.run_id.to_string())
+        .env("ORC_ATTEMPT", attempt.number.to_string())
+        .env("ORC_INPUT", inputs)
+        .env("ORC_OUTPUT", outputs)
+        .env_remove("ORC_CONTROL_ENDPOINT")
+        .env_remove("ORC_RESUME_SESSION")
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit());
+    if let Some(stdout) = &process.stdout {
+        let path = output_paths
+            .get(stdout)
+            .ok_or_else(|| invalid_run(execution.run_id, "Process stdout output отсутствует"))?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|source| {
+                runtime(
+                    "run",
+                    format!("не удалось создать Process stdout {}", path.display()),
+                    source,
+                )
+            })?;
+        command.stdout(Stdio::from(file));
+    } else {
+        command.stdout(Stdio::inherit());
+    }
+    command.process_group(0);
+    Ok(command)
+}
+
+fn process_output_paths(
+    directory: &Path,
+    attempt: u64,
+    step: &MaterializedStep,
+    run_id: RunId,
+) -> Result<BTreeMap<String, PathBuf>, CommandError> {
+    if step.outputs.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let staging = loop {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = directory.join(format!(
+            ".{attempt}.{}.process.{}.{sequence}.tmp",
+            step.id,
+            std::process::id()
+        ));
+        match fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(CommandError::Runtime {
+                    context: format!("run {run_id}: не удалось создать Process staging directory"),
+                    source,
+                });
+            }
+        }
+    };
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)).map_err(|source| {
+        CommandError::Runtime {
+            context: format!("run {run_id}: не удалось защитить Process staging directory"),
+            source,
+        }
+    })?;
+    Ok(step
+        .outputs
+        .iter()
+        .map(|output| (output.clone(), staging.join(output)))
+        .collect())
+}
+
+fn render_process_argument(
+    template: &str,
+    parameters: &BTreeMap<String, String>,
+    inputs: &[AgentInput],
+    outputs: &BTreeMap<String, PathBuf>,
+    run_id: RunId,
+) -> Result<String, CommandError> {
+    if !template.contains("{{") && !template.contains("}}") {
+        return Ok(template.to_owned());
+    }
+    let body = template
+        .strip_prefix("{{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .ok_or_else(|| invalid_run(run_id, "Process placeholder не занимает весь argv element"))?;
+    let parts = body.split(':').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["param", parameter_id] => parameters
+            .get(*parameter_id)
+            .cloned()
+            .ok_or_else(|| invalid_run(run_id, "Process parameter отсутствует в spec.yaml")),
+        ["path", step_id, input_id] => inputs
+            .iter()
+            .find(|input| input.step_id == *step_id && input.input_id == *input_id)
+            .ok_or_else(|| invalid_run(run_id, "Process path отсутствует в input mapping"))?
+            .path
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| invalid_run(run_id, "Process input path не является UTF-8")),
+        ["output", input_id] => outputs
+            .get(*input_id)
+            .ok_or_else(|| invalid_run(run_id, "Process output отсутствует в mapping"))?
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| invalid_run(run_id, "Process output path не является UTF-8")),
+        _ => Err(invalid_run(run_id, "невалидный Process placeholder")),
+    }
+}
+
+fn read_process_outputs(
+    run_id: RunId,
+    step: &MaterializedStep,
+    paths: &BTreeMap<String, PathBuf>,
+) -> Result<CompletionCandidate, CommandError> {
+    let mut outputs = BTreeMap::new();
+    for output in &step.outputs {
+        let path = paths
+            .get(output)
+            .ok_or_else(|| invalid_run(run_id, "Process output mapping неполон"))?;
+        let metadata = fs::metadata(path).map_err(|source| CommandError::Runtime {
+            context: format!("run {run_id}: Process не создал обязательный output '{output}'"),
+            source,
+        })?;
+        if !metadata.is_file() {
+            return Err(CommandError::Runtime {
+                context: format!(
+                    "run {run_id}: Process output '{}' не является regular file",
+                    path.display()
+                ),
+                source: std::io::Error::other("invalid Process output"),
+            });
+        }
+        let bytes = fs::read(path).map_err(|source| {
+            runtime(
+                "run",
+                format!("не удалось прочитать Process output {}", path.display()),
+                source,
+            )
+        })?;
+        outputs.insert(output.clone(), bytes);
+    }
+    Ok(CompletionCandidate(outputs))
+}
+
+fn cleanup_process_outputs(paths: &BTreeMap<String, PathBuf>) {
+    let staging = paths
+        .values()
+        .next()
+        .and_then(|path| path.parent())
+        .map(Path::to_owned);
+    for path in paths.values() {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(staging) = staging {
+        let _ = fs::remove_dir(staging);
     }
 }
 
@@ -1257,8 +1628,8 @@ fn execute_scheduler(
         contexts: Mutex::new(HashMap::new()),
         storage: Arc::new(Mutex::new(())),
     });
-    let server = registry
-        .uses_process_control()
+    let has_agent_steps = workflow.steps.iter().any(|step| step.agent.is_some());
+    let server = (has_agent_steps && registry.uses_process_control())
         .then(|| ControlServer::start(&guard.directory, Arc::clone(&hub)))
         .transpose()?;
     let endpoint = server
@@ -2535,6 +2906,10 @@ fn validate_materialized(
     if workflow.max_parallel_agents == 0
         || workflow.steps.is_empty()
         || !valid_id(&workflow.workflow_id)
+        || workflow
+            .parameters
+            .iter()
+            .any(|(id, value)| !valid_id(id) || value.contains('\0'))
     {
         return Err(invalid_run(run_id, "невалидный materialized workflow"));
     }
@@ -2551,9 +2926,30 @@ fn validate_materialized(
                 "невалидные или повторяющиеся Step/Input IDs",
             ));
         }
-        registry
-            .validate(&step.agent.r#type, &step.agent.model, &step.agent.reasoning)
-            .map_err(|context| invalid_run(run_id, &context))?;
+        match (&step.agent, &step.process) {
+            (Some(agent), None) => registry
+                .validate(&agent.r#type, &agent.model, &agent.reasoning)
+                .map_err(|context| invalid_run(run_id, &context))?,
+            (None, Some(process)) => {
+                if step.human
+                    || step.prompt.is_some()
+                    || !process.executable.is_absolute()
+                    || !process.cwd.is_absolute()
+                    || process
+                        .stdout
+                        .as_ref()
+                        .is_some_and(|id| !step.outputs.contains(id))
+                {
+                    return Err(invalid_run(run_id, "невалидный materialized Process Step"));
+                }
+            }
+            _ => {
+                return Err(invalid_run(
+                    run_id,
+                    "Step должен содержать ровно один Agent или Process executor",
+                ));
+            }
+        }
     }
     for step in &workflow.steps {
         let dependencies: HashSet<&str> = step.depends_on.iter().map(String::as_str).collect();
@@ -2568,8 +2964,54 @@ fn validate_materialized(
                 "depends-on повторяется или ссылается на неизвестный Step",
             ));
         }
+        if let Some(process) = &step.process {
+            for argument in &process.args {
+                validate_materialized_process_argument(workflow, step, argument, run_id)?;
+            }
+        }
     }
     Ok(())
+}
+
+fn validate_materialized_process_argument(
+    workflow: &MaterializedWorkflow,
+    step: &MaterializedStep,
+    argument: &str,
+    run_id: RunId,
+) -> Result<(), CommandError> {
+    if argument.contains('\0') {
+        return Err(invalid_run(run_id, "Process argv содержит NUL"));
+    }
+    if !argument.contains("{{") && !argument.contains("}}") {
+        return Ok(());
+    }
+    let body = argument
+        .strip_prefix("{{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .ok_or_else(|| invalid_run(run_id, "Process placeholder не занимает весь argv element"))?;
+    let parts = body.split(':').collect::<Vec<_>>();
+    let valid = match parts.as_slice() {
+        ["param", parameter] => workflow.parameters.contains_key(*parameter),
+        ["path", source_step, input_id] => {
+            step.depends_on
+                .iter()
+                .any(|dependency| dependency == source_step)
+                && workflow.steps.iter().any(|source| {
+                    source.id == *source_step
+                        && source.outputs.iter().any(|output| output == input_id)
+                })
+        }
+        ["output", output] => step.outputs.iter().any(|candidate| candidate == output),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid_run(
+            run_id,
+            "невалидный materialized Process placeholder",
+        ))
+    }
 }
 
 fn load_attempts(

@@ -1,8 +1,10 @@
 //! Materialization и validation workflow graph; модуль не планирует attempts и не записывает состояние run.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -88,6 +90,8 @@ impl SymbolicId {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawWorkflow {
+    #[serde(default)]
+    pub(crate) parameters: BTreeMap<String, String>,
     pub(crate) steps: Vec<RawStep>,
 }
 
@@ -97,17 +101,36 @@ pub(crate) struct RawStep {
     pub(crate) id: String,
     pub(crate) agent: Option<String>,
     pub(crate) prompt: Option<String>,
+    pub(crate) process: Option<RawProcess>,
     pub(crate) human: bool,
     pub(crate) depends_on: Vec<String>,
     pub(crate) outputs: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawProcess {
+    pub(crate) executable: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) stdout: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessStep {
+    pub(crate) executable: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) stdout: Option<SymbolicId>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Step {
     pub(crate) id: SymbolicId,
-    pub(crate) agent: RawAgent,
+    pub(crate) agent: Option<RawAgent>,
     pub(crate) prompt: Option<String>,
     pub(crate) human: bool,
+    pub(crate) process: Option<ProcessStep>,
     pub(crate) depends_on: Vec<SymbolicId>,
     pub(crate) outputs: Vec<SymbolicId>,
 }
@@ -116,6 +139,7 @@ pub(crate) struct Step {
 pub(crate) struct Workflow {
     pub(crate) id: WorkflowId,
     pub(crate) max_parallel_agents: usize,
+    pub(crate) parameters: Vec<SymbolicId>,
     pub(crate) steps: Vec<Step>,
 }
 
@@ -244,6 +268,42 @@ pub struct WorkflowPlanAgent {
     reasoning: String,
 }
 
+/// Materialized Process executor одного Step.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct WorkflowPlanProcess {
+    executable: String,
+    args: Vec<String>,
+    cwd: String,
+    stdout: Option<String>,
+}
+
+impl WorkflowPlanProcess {
+    /// Возвращает абсолютный executable path.
+    #[must_use]
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+
+    /// Возвращает argv templates в source order.
+    #[must_use]
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// Возвращает абсолютный working directory.
+    #[must_use]
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    /// Возвращает output, в который направляется stdout.
+    #[must_use]
+    pub fn stdout(&self) -> Option<&str> {
+        self.stdout.as_deref()
+    }
+}
+
 impl WorkflowPlanAgent {
     /// Возвращает built-in `AgentTypeId`.
     #[must_use]
@@ -269,9 +329,10 @@ impl WorkflowPlanAgent {
 #[non_exhaustive]
 pub struct WorkflowPlanStep {
     id: String,
-    agent: WorkflowPlanAgent,
+    agent: Option<WorkflowPlanAgent>,
     prompt: Option<String>,
     human: bool,
+    process: Option<WorkflowPlanProcess>,
     depends_on: Vec<String>,
     outputs: Vec<String>,
 }
@@ -283,10 +344,10 @@ impl WorkflowPlanStep {
         &self.id
     }
 
-    /// Возвращает materialized Agent.
+    /// Возвращает materialized Agent только для Agent Step.
     #[must_use]
-    pub const fn agent(&self) -> &WorkflowPlanAgent {
-        &self.agent
+    pub const fn agent(&self) -> Option<&WorkflowPlanAgent> {
+        self.agent.as_ref()
     }
 
     /// Возвращает точный materialized prompt content.
@@ -299,6 +360,12 @@ impl WorkflowPlanStep {
     #[must_use]
     pub const fn is_human(&self) -> bool {
         self.human
+    }
+
+    /// Возвращает materialized Process executor для Process Step.
+    #[must_use]
+    pub const fn process(&self) -> Option<&WorkflowPlanProcess> {
+        self.process.as_ref()
     }
 
     /// Возвращает dependencies в source order.
@@ -320,6 +387,7 @@ impl WorkflowPlanStep {
 pub struct WorkflowPlan {
     workflow_id: String,
     max_parallel_agents: usize,
+    parameters: Vec<String>,
     steps: Vec<WorkflowPlanStep>,
 }
 
@@ -334,6 +402,12 @@ impl WorkflowPlan {
     #[must_use]
     pub const fn max_parallel_agents(&self) -> usize {
         self.max_parallel_agents
+    }
+
+    /// Возвращает объявленные `ParameterIds` в детерминированном порядке.
+    #[must_use]
+    pub fn parameters(&self) -> &[String] {
+        &self.parameters
     }
 
     /// Возвращает materialized Steps в source order.
@@ -403,6 +477,7 @@ pub fn execute_validate_with_registry(
         workflow_id,
         &config.raw,
         config.max_parallel_agents().get(),
+        environment,
     )?;
     validate_graph(&workflow)?;
     Ok(format!("workflow {}: valid", workflow.id.as_str()))
@@ -582,18 +657,29 @@ impl From<Workflow> for WorkflowPlan {
         Self {
             workflow_id: workflow.id.into_string(),
             max_parallel_agents: workflow.max_parallel_agents,
+            parameters: workflow
+                .parameters
+                .into_iter()
+                .map(SymbolicId::into_string)
+                .collect(),
             steps: workflow
                 .steps
                 .into_iter()
                 .map(|step| WorkflowPlanStep {
                     id: step.id.into_string(),
-                    agent: WorkflowPlanAgent {
-                        agent_type: step.agent.r#type,
-                        model: step.agent.model,
-                        reasoning: step.agent.reasoning,
-                    },
+                    agent: step.agent.map(|agent| WorkflowPlanAgent {
+                        agent_type: agent.r#type,
+                        model: agent.model,
+                        reasoning: agent.reasoning,
+                    }),
                     prompt: step.prompt,
                     human: step.human,
+                    process: step.process.map(|process| WorkflowPlanProcess {
+                        executable: process.executable.to_string_lossy().into_owned(),
+                        args: process.args,
+                        cwd: process.cwd.to_string_lossy().into_owned(),
+                        stdout: process.stdout.map(SymbolicId::into_string),
+                    }),
                     depends_on: step
                         .depends_on
                         .into_iter()
@@ -731,23 +817,38 @@ fn render_workflow_plan(
             )
             .map_err(workflow_formatting_error)?;
             for step in &plan.steps {
-                let prompt_bytes = step
-                    .prompt
-                    .as_ref()
-                    .map_or_else(|| "-".to_owned(), |prompt| prompt.len().to_string());
-                writeln!(
-                    output,
-                    "step {}: type={} model={} reasoning={} prompt-bytes={} human={} depends-on={} outputs={}",
-                    step.id,
-                    step.agent.agent_type,
-                    step.agent.model,
-                    step.agent.reasoning,
-                    prompt_bytes,
-                    step.human,
-                    joined_or_dash(&step.depends_on),
-                    joined_or_dash(&step.outputs)
-                )
-                .map_err(workflow_formatting_error)?;
+                if let Some(agent) = &step.agent {
+                    let prompt_bytes = step
+                        .prompt
+                        .as_ref()
+                        .map_or_else(|| "-".to_owned(), |prompt| prompt.len().to_string());
+                    writeln!(
+                        output,
+                        "step {}: type={} model={} reasoning={} prompt-bytes={} human={} depends-on={} outputs={}",
+                        step.id,
+                        agent.agent_type,
+                        agent.model,
+                        agent.reasoning,
+                        prompt_bytes,
+                        step.human,
+                        joined_or_dash(&step.depends_on),
+                        joined_or_dash(&step.outputs)
+                    )
+                    .map_err(workflow_formatting_error)?;
+                } else if let Some(process) = &step.process {
+                    writeln!(
+                        output,
+                        "step {}: executor=process executable={} args={} cwd={} stdout={} depends-on={} outputs={}",
+                        step.id,
+                        process.executable,
+                        process.args.len(),
+                        process.cwd,
+                        process.stdout.as_deref().unwrap_or("-"),
+                        joined_or_dash(&step.depends_on),
+                        joined_or_dash(&step.outputs)
+                    )
+                    .map_err(workflow_formatting_error)?;
+                }
             }
             output.pop();
             Ok(output)
@@ -807,6 +908,7 @@ fn materialize(
     workflow_id: &WorkflowId,
     config: &RawConfig,
     max_parallel_agents: usize,
+    environment: &ProcessEnvironment,
 ) -> Result<Workflow, CommandError> {
     let path = workflow_path(root, workflow_id);
     require_regular_workflow(&path, workflow_id)?;
@@ -824,6 +926,8 @@ fn materialize(
     if raw.steps.is_empty() {
         return Err(invalid_workflow(workflow_id, "steps должен быть непустым"));
     }
+
+    let parameters = parse_parameters(workflow_id, raw.parameters)?;
 
     let mut step_ids = HashSet::with_capacity(raw.steps.len());
     let mut steps = Vec::with_capacity(raw.steps.len());
@@ -844,24 +948,52 @@ fn materialize(
             raw_step.depends_on,
         )?;
         let outputs = parse_unique_ids(workflow_id, step_id.as_str(), "outputs", raw_step.outputs)?;
-        let agent = resolve_agent(
-            workflow_id,
-            step_id.as_str(),
-            raw_step.agent.as_deref(),
-            config,
-        )?;
-        let prompt = load_prompt(
-            root,
-            workflow_id,
-            step_id.as_str(),
-            raw_step.prompt,
-            &mut prompt_cache,
-        )?;
+        let (agent, prompt, human, process) = if let Some(raw_process) = raw_step.process {
+            if raw_step.agent.is_some() {
+                return Err(invalid_step(
+                    workflow_id,
+                    step_id.as_str(),
+                    "Process Step не допускает поле agent",
+                ));
+            }
+            if raw_step.prompt.is_some() {
+                return Err(invalid_step(
+                    workflow_id,
+                    step_id.as_str(),
+                    "Process Step не допускает поле prompt",
+                ));
+            }
+            if raw_step.human {
+                return Err(invalid_step(
+                    workflow_id,
+                    step_id.as_str(),
+                    "Process Step не может быть human",
+                ));
+            }
+            let process = resolve_process(workflow_id, step_id.as_str(), raw_process, environment)?;
+            (None, None, false, Some(process))
+        } else {
+            let agent = resolve_agent(
+                workflow_id,
+                step_id.as_str(),
+                raw_step.agent.as_deref(),
+                config,
+            )?;
+            let prompt = load_prompt(
+                root,
+                workflow_id,
+                step_id.as_str(),
+                raw_step.prompt,
+                &mut prompt_cache,
+            )?;
+            (Some(agent), prompt, raw_step.human, None)
+        };
         steps.push(Step {
             id: step_id,
             agent,
             prompt,
-            human: raw_step.human,
+            human,
+            process,
             depends_on,
             outputs,
         });
@@ -869,8 +1001,180 @@ fn materialize(
     Ok(Workflow {
         id: workflow_id.clone(),
         max_parallel_agents,
+        parameters,
         steps,
     })
+}
+
+fn parse_parameters(
+    workflow_id: &WorkflowId,
+    raw: BTreeMap<String, String>,
+) -> Result<Vec<SymbolicId>, CommandError> {
+    let mut parameters = Vec::with_capacity(raw.len());
+    for (id, parameter_type) in raw {
+        let id = SymbolicId::parse("ParameterId", &id)
+            .map_err(|context| invalid_workflow(workflow_id, &context))?;
+        if parameter_type != "string" {
+            return Err(invalid_workflow(
+                workflow_id,
+                &format!(
+                    "Parameter '{}' имеет неподдерживаемый type '{parameter_type}'",
+                    id.as_str()
+                ),
+            ));
+        }
+        parameters.push(id);
+    }
+    Ok(parameters)
+}
+
+fn resolve_process(
+    workflow_id: &WorkflowId,
+    step_id: &str,
+    raw: RawProcess,
+    environment: &ProcessEnvironment,
+) -> Result<ProcessStep, CommandError> {
+    if raw.executable.is_empty()
+        || raw.executable.contains('\0')
+        || raw.executable.contains("{{")
+        || raw.executable.contains("}}")
+    {
+        return Err(invalid_step(
+            workflow_id,
+            step_id,
+            "Process executable должен быть непустой строкой без NUL и placeholders",
+        ));
+    }
+    if raw.args.iter().any(|argument| argument.contains('\0')) {
+        return Err(invalid_step(
+            workflow_id,
+            step_id,
+            "Process args не могут содержать NUL",
+        ));
+    }
+    let current_dir = environment.current_dir.clone().map_or_else(
+        || {
+            env::current_dir().map_err(|source| CommandError::Runtime {
+                context: format!(
+                    "validate: workflow '{}': не удалось определить current working directory",
+                    workflow_id.as_str()
+                ),
+                source,
+            })
+        },
+        Ok,
+    )?;
+    let cwd = raw.cwd.map_or_else(
+        || Ok(current_dir.clone()),
+        |value| {
+            if value.is_empty()
+                || value.contains('\0')
+                || value.contains("{{")
+                || value.contains("}}")
+            {
+                return Err(invalid_step(
+                    workflow_id,
+                    step_id,
+                    "Process cwd должен быть непустой строкой без NUL и placeholders",
+                ));
+            }
+            let path = PathBuf::from(value);
+            Ok(if path.is_absolute() {
+                path
+            } else {
+                current_dir.join(path)
+            })
+        },
+    )?;
+    let cwd = fs::canonicalize(&cwd).map_err(|source| CommandError::Runtime {
+        context: format!(
+            "validate: workflow '{}': Step '{step_id}': Process cwd '{}' недоступен",
+            workflow_id.as_str(),
+            cwd.display()
+        ),
+        source,
+    })?;
+    if !cwd.is_dir() {
+        return Err(invalid_step(
+            workflow_id,
+            step_id,
+            &format!("Process cwd '{}' не является directory", cwd.display()),
+        ));
+    }
+    let executable = resolve_executable(
+        workflow_id,
+        step_id,
+        &raw.executable,
+        &cwd,
+        environment.path.as_deref(),
+    )?;
+    let stdout = raw
+        .stdout
+        .map(|id| {
+            SymbolicId::parse("InputId", &id)
+                .map_err(|context| invalid_step(workflow_id, step_id, &context))
+        })
+        .transpose()?;
+    Ok(ProcessStep {
+        executable,
+        args: raw.args,
+        cwd,
+        stdout,
+    })
+}
+
+fn resolve_executable(
+    workflow_id: &WorkflowId,
+    step_id: &str,
+    value: &str,
+    cwd: &Path,
+    configured_path: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, CommandError> {
+    let candidate = PathBuf::from(value);
+    let candidate = if candidate.is_absolute() {
+        Some(candidate)
+    } else if value.contains('/') {
+        Some(cwd.join(candidate))
+    } else {
+        let path = configured_path
+            .map(std::ffi::OsStr::to_owned)
+            .or_else(|| env::var_os("PATH"));
+        path.and_then(|path| {
+            env::split_paths(&path)
+                .map(|directory| directory.join(value))
+                .find(|path| is_executable_file(path))
+        })
+    };
+    let Some(candidate) = candidate else {
+        return Err(invalid_step(
+            workflow_id,
+            step_id,
+            &format!("Process executable '{value}' не найден в PATH"),
+        ));
+    };
+    if !is_executable_file(&candidate) {
+        return Err(invalid_step(
+            workflow_id,
+            step_id,
+            &format!(
+                "Process executable '{}' не является executable regular file",
+                candidate.display()
+            ),
+        ));
+    }
+    fs::canonicalize(&candidate).map_err(|source| CommandError::Runtime {
+        context: format!(
+            "validate: workflow '{}': Step '{step_id}': не удалось разрешить Process executable '{}'",
+            workflow_id.as_str(),
+            candidate.display()
+        ),
+        source,
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 pub(crate) fn materialize_for_lifecycle(
@@ -901,6 +1205,7 @@ pub(crate) fn materialize_for_lifecycle(
         workflow_id,
         &config.raw,
         config.max_parallel_agents().get(),
+        environment,
     )
     .and_then(|workflow| {
         validate_graph(&workflow)?;
@@ -1066,7 +1371,6 @@ fn validate_graph(workflow: &Workflow) -> Result<(), CommandError> {
         .map(|step| (step.id.as_str(), step))
         .collect();
     for (index, step) in workflow.steps.iter().enumerate() {
-        let _ = (&step.agent, step.human);
         for dependency in &step.depends_on {
             if !by_id.contains_key(dependency.as_str()) {
                 return Err(invalid_step(
@@ -1090,8 +1394,122 @@ fn validate_graph(workflow: &Workflow) -> Result<(), CommandError> {
             }
             validate_placeholders(workflow, step, &by_id, &placeholders)?;
         }
+        if let Some(process) = &step.process {
+            validate_process(workflow, step, &by_id, process)?;
+        }
     }
     validate_reachability(workflow)
+}
+
+fn validate_process(
+    workflow: &Workflow,
+    step: &Step,
+    by_id: &HashMap<&str, &Step>,
+    process: &ProcessStep,
+) -> Result<(), CommandError> {
+    if let Some(stdout) = &process.stdout
+        && !step.outputs.contains(stdout)
+    {
+        return Err(invalid_step(
+            &workflow.id,
+            step.id.as_str(),
+            &format!(
+                "Process stdout ссылается на неизвестный output '{}'",
+                stdout.as_str()
+            ),
+        ));
+    }
+    for argument in &process.args {
+        validate_process_argument(workflow, step, by_id, argument)?;
+    }
+    Ok(())
+}
+
+fn validate_process_argument(
+    workflow: &Workflow,
+    step: &Step,
+    by_id: &HashMap<&str, &Step>,
+    argument: &str,
+) -> Result<(), CommandError> {
+    if !argument.contains("{{") && !argument.contains("}}") {
+        return Ok(());
+    }
+    let Some(body) = argument
+        .strip_prefix("{{")
+        .and_then(|value| value.strip_suffix("}}"))
+    else {
+        return Err(invalid_step(
+            &workflow.id,
+            step.id.as_str(),
+            "Process placeholder должен занимать весь argv element",
+        ));
+    };
+    if body.contains("{{")
+        || body.contains("}}")
+        || body.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(invalid_step(
+            &workflow.id,
+            step.id.as_str(),
+            &format!("невалидный Process placeholder '{{{{{body}}}}}'"),
+        ));
+    }
+    let parts = body.split(':').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["param", parameter_id] => {
+            let parameter_id = SymbolicId::parse("ParameterId", parameter_id)
+                .map_err(|context| invalid_step(&workflow.id, step.id.as_str(), &context))?;
+            if !workflow.parameters.contains(&parameter_id) {
+                return Err(invalid_step(
+                    &workflow.id,
+                    step.id.as_str(),
+                    &format!(
+                        "Process placeholder ссылается на неизвестный parameter '{}'",
+                        parameter_id.as_str()
+                    ),
+                ));
+            }
+        }
+        ["path", source_step, input_id] => {
+            let placeholder = Placeholder {
+                kind: PlaceholderKind::Path,
+                step_id: SymbolicId::parse("StepId", source_step)
+                    .map_err(|context| invalid_step(&workflow.id, step.id.as_str(), &context))?,
+                input_id: SymbolicId::parse("InputId", input_id)
+                    .map_err(|context| invalid_step(&workflow.id, step.id.as_str(), &context))?,
+            };
+            validate_placeholders(workflow, step, by_id, &[placeholder])?;
+        }
+        ["output", input_id] => {
+            let input_id = SymbolicId::parse("InputId", input_id)
+                .map_err(|context| invalid_step(&workflow.id, step.id.as_str(), &context))?;
+            if !step.outputs.contains(&input_id) {
+                return Err(invalid_step(
+                    &workflow.id,
+                    step.id.as_str(),
+                    &format!(
+                        "Process placeholder ссылается на неизвестный output '{}'",
+                        input_id.as_str()
+                    ),
+                ));
+            }
+        }
+        ["content", ..] => {
+            return Err(invalid_step(
+                &workflow.id,
+                step.id.as_str(),
+                "content placeholder запрещён в Process args",
+            ));
+        }
+        _ => {
+            return Err(invalid_step(
+                &workflow.id,
+                step.id.as_str(),
+                &format!("невалидный Process placeholder '{{{{{body}}}}}'"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_placeholders(

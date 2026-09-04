@@ -8,13 +8,14 @@ Feature: Read-only inspection durable runs
       When выполняется run list через публичный API
       Then inspection завершается с кодом 0
       And inspection output пуст
+      And inspection не изменил durable state
 
     @process
-    Scenario: Runs перечисляются по RunId с вычисленным состоянием
-      Given подготовлены active, blocked и completed durable runs
+    Scenario: Числовые runs перечисляются по RunId с вычисленным состоянием, а остальные entries игнорируются
+      Given подготовлены active, blocked и completed durable runs и нечисловые entries
       When запускается orchestrator run list
       Then inspection завершается с кодом 0
-      And список runs отсортирован и содержит три вычисленных состояния
+      And text list содержит по одной отсортированной summary-строке для active, blocked и completed
       And inspection не изменил durable state
 
     @process
@@ -24,6 +25,34 @@ Feature: Read-only inspection durable runs
       Then inspection завершается с кодом 3
       And inspection output пуст
       And inspection не изменил durable state
+
+    @process
+    Scenario: Скрытый фильтром противоречивый run всё равно отклоняет полный список
+      Given подготовлены completed и противоречивый durable runs
+      When запускается orchestrator run list только для completed
+      Then inspection завершается с кодом 3
+      And inspection output пуст
+      And inspection не изменил durable state
+
+    @process
+    Scenario: State filters объединяются как OR, workflow как AND, а повторы идемпотентны
+      Given подготовлены active, blocked и completed durable runs
+      When запускается orchestrator run list с active, completed, completed и workflow completed
+      Then inspection завершается с кодом 0
+      And inspection output содержит только completed run
+
+    @process
+    Scenario Outline: Невалидный list filter отклоняется до чтения runs
+      Given подготовлены completed и противоречивый durable runs
+      When запускается orchestrator run list с невалидным filter "<filter>"
+      Then inspection завершается с кодом 2
+      And inspection output пуст
+
+      Examples:
+        | filter      |
+        | state       |
+        | format      |
+        | workflow-id |
 
   @spec:read-only-inspection @workflow:initial-activation-dependencies-и-frontier @format:materialized-workflow @format:agent-attempt-record @cli:read-only-run-inspection
   Rule: Run show отображает validated read model
@@ -91,18 +120,25 @@ Feature: Read-only inspection durable runs
       And список artifacts содержит две опубликованные версии
       And inspection не изменил durable state
 
+    @process
+    Scenario: Пустой набор completed artifacts успешен
+      Given подготовлен completed durable run 30
+      When запускается orchestrator run artifacts 30
+      Then inspection завершается с кодом 0
+      And inspection output пуст
+
   @spec:read-only-inspection @cli:read-only-run-inspection
   Rule: Inspection renderers используют одну typed model
 
     @process
     Scenario: JSON show сохраняет числовые и nullable поля
-      Given подготовлен active durable run с session и ready Step
-      When запускается orchestrator run show 20 в JSON
+      Given подготовлен active durable run 10 без session
+      When запускается orchestrator run show 10 в JSON
       Then inspection завершается с кодом 0
-      And JSON show содержит typed snapshot run 20
+      And JSON show содержит snake_case typed snapshot run 10 с number, null и arrays
 
     @process
-    Scenario: List фильтрует только после полной validation
+    Scenario: Text является default renderer списка
       Given подготовлены active, blocked и completed durable runs
       When запускается orchestrator run list для completed workflow
       Then inspection завершается с кодом 0
@@ -127,5 +163,5 @@ Feature: Read-only inspection durable runs
       Given подготовлены valid и два противоречивых durable runs
       When запускается orchestrator run verify в JSON
       Then inspection завершается с кодом 3
-      And verify report содержит все три runs
+      And verify JSON report содержит все три runs по RunId и diagnostics каждого invalid run
       And inspection не изменил durable state

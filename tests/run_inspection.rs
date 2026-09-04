@@ -40,6 +40,15 @@ fn three_run_states(world: &mut InspectionWorld) {
     write_completed_run(world.root(), 30);
 }
 
+#[given("подготовлены active, blocked и completed durable runs и нечисловые entries")]
+fn three_run_states_and_non_numeric_entries(world: &mut InspectionWorld) {
+    three_run_states(world);
+    fs::create_dir_all(world.root().join("run/draft"))
+        .expect("non-numeric directory must be created");
+    fs::write(world.root().join("run/README"), "not a run")
+        .expect("non-numeric file must be written");
+}
+
 #[given("подготовлены completed и противоречивый durable runs")]
 fn valid_and_invalid_runs(world: &mut InspectionWorld) {
     empty_inspection_root(world);
@@ -54,6 +63,12 @@ fn valid_and_invalid_runs(world: &mut InspectionWorld) {
 fn active_run_with_ready_step(world: &mut InspectionWorld) {
     empty_inspection_root(world);
     write_ready_run(world.root(), 20);
+}
+
+#[given(expr = "подготовлен active durable run {int} без session")]
+fn active_run_without_session(world: &mut InspectionWorld, run_id: u64) {
+    empty_inspection_root(world);
+    write_active_run(world.root(), run_id);
 }
 
 #[given("подготовлен active durable run с удерживаемым lock")]
@@ -93,6 +108,10 @@ fn versioned_binary_artifacts(world: &mut InspectionWorld) {
         .expect("first artifact must be written");
     fs::write(directory.join("2.first.result.artifact"), b"second")
         .expect("second artifact must be written");
+    fs::write(directory.join("1.first.result.artifact"), b"unfinished")
+        .expect("unfinished artifact must be written");
+    fs::write(directory.join(".artifact.tmp"), b"temporary")
+        .expect("temporary artifact must be written");
 }
 
 #[given(expr = "подготовлен completed durable run {int}")]
@@ -133,6 +152,41 @@ fn show_through_api(world: &mut InspectionWorld, run_id: String) {
 #[when("запускается orchestrator run list")]
 fn list_through_cli(world: &mut InspectionWorld) {
     run_cli(world, ["run", "list"]);
+}
+
+#[when("запускается orchestrator run list только для completed")]
+fn completed_list_through_cli(world: &mut InspectionWorld) {
+    run_cli(world, ["run", "list", "--state", "completed"]);
+}
+
+#[when("запускается orchestrator run list с active, completed, completed и workflow completed")]
+fn composed_list_filters_through_cli(world: &mut InspectionWorld) {
+    run_cli(
+        world,
+        [
+            "run",
+            "list",
+            "--state",
+            "active",
+            "--state",
+            "completed",
+            "--state",
+            "completed",
+            "--workflow",
+            "completed",
+        ],
+    );
+}
+
+#[when(expr = "запускается orchestrator run list с невалидным filter {string}")]
+#[allow(clippy::needless_pass_by_value)]
+fn invalid_list_filter_through_cli(world: &mut InspectionWorld, filter: String) {
+    match filter.as_str() {
+        "state" => run_cli(world, ["run", "list", "--state", "unknown"]),
+        "format" => run_cli(world, ["run", "list", "--format", "yaml"]),
+        "workflow-id" => run_cli(world, ["run", "list", "--workflow", "Bad"]),
+        other => panic!("unknown invalid filter: {other}"),
+    }
 }
 
 #[when("запускается orchestrator run list для completed workflow")]
@@ -230,7 +284,9 @@ fn inspection_output_is_empty(world: &mut InspectionWorld) {
     assert!(world.observed().stdout.is_empty());
 }
 
-#[then("список runs отсортирован и содержит три вычисленных состояния")]
+#[then(
+    "text list содержит по одной отсортированной summary-строке для active, blocked и completed"
+)]
 fn list_is_sorted_with_states(world: &mut InspectionWorld) {
     assert_eq!(
         world.stdout_text(),
@@ -286,13 +342,17 @@ fn typed_snapshot_has_two_versions(world: &mut InspectionWorld) {
     assert_eq!(snapshot.artifacts()[1].attempt(), 2);
 }
 
-#[then(expr = "JSON show содержит typed snapshot run {int}")]
+#[then(expr = "JSON show содержит snake_case typed snapshot run {int} с number, null и arrays")]
 fn json_show_has_typed_snapshot(world: &mut InspectionWorld, run_id: u64) {
     let value: serde_json::Value =
         serde_json::from_slice(&world.observed().stdout).expect("show stdout must be JSON");
     assert_eq!(value["run_id"], run_id);
     assert_eq!(value["attempts"][0]["number"], 0);
-    assert_eq!(value["attempts"][0]["session"], "native-session");
+    assert!(value["attempts"][0]["session"].is_null());
+    assert!(value["steps"].is_array());
+    assert!(value["attempts"].is_array());
+    assert!(value["frontier"]["ready"].is_array());
+    assert!(value["frontier"]["missing"].is_array());
     assert!(value["artifacts"].is_array());
 }
 
@@ -313,14 +373,31 @@ fn watch_published_one_json_snapshot(world: &mut InspectionWorld) {
     assert_eq!(value["state"], "completed");
 }
 
-#[then("verify report содержит все три runs")]
+#[then("verify JSON report содержит все три runs по RunId и diagnostics каждого invalid run")]
 fn verify_report_contains_all_runs(world: &mut InspectionWorld) {
     let value: serde_json::Value =
         serde_json::from_slice(&world.observed().stdout).expect("verify stdout must be JSON");
     assert_eq!(value["runs"].as_array().map(Vec::len), Some(3));
+    assert_eq!(value["runs"][0]["run_id"], 10);
+    assert_eq!(value["runs"][1]["run_id"], 20);
+    assert_eq!(value["runs"][2]["run_id"], 30);
     assert_eq!(value["runs"][0]["valid"], true);
     assert_eq!(value["runs"][1]["valid"], false);
     assert_eq!(value["runs"][2]["valid"], false);
+    assert_eq!(
+        value["runs"][0]["diagnostics"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert!(
+        value["runs"][1]["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| !diagnostics.is_empty())
+    );
+    assert!(
+        value["runs"][2]["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| !diagnostics.is_empty())
+    );
 }
 
 #[then("inspection не изменил durable state")]
@@ -383,6 +460,8 @@ fn environment(root: &Path) -> ProcessEnvironment {
     ProcessEnvironment {
         home: None,
         orc_home: Some(root.as_os_str().to_owned()),
+        current_dir: None,
+        path: None,
     }
 }
 

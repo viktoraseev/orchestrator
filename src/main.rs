@@ -47,6 +47,8 @@ enum TopLevelCommand {
     },
     Start {
         workflow_id: Option<String>,
+        #[arg(long = "param", action = clap::ArgAction::Append)]
+        parameters: Vec<String>,
     },
     Resume {
         run_id: String,
@@ -341,6 +343,8 @@ fn main() -> ExitCode {
     let environment = ProcessEnvironment {
         home: env::var_os("HOME"),
         orc_home: env::var_os("ORC_HOME"),
+        current_dir: env::current_dir().ok(),
+        path: env::var_os("PATH"),
     };
     match dispatch(cli.command, &environment) {
         Ok(CommandOutput::Text(output)) => write_text_output(&output),
@@ -441,11 +445,17 @@ fn dispatch(
                     .map(CommandOutput::Text)
             }
         }
-        TopLevelCommand::Start { workflow_id } => {
-            let command = workflow_id.map_or_else(
-                || Ok(LifecycleCommand::start_configured_default()),
-                |workflow_id| LifecycleCommand::start_explicit(&workflow_id),
-            )?;
+        TopLevelCommand::Start {
+            workflow_id,
+            parameters,
+        } => {
+            let parameters = parse_run_parameters(parameters)?;
+            let command = match workflow_id {
+                Some(workflow_id) => {
+                    LifecycleCommand::start_explicit_with_parameters(&workflow_id, parameters)?
+                }
+                None => LifecycleCommand::start_configured_default_with_parameters(parameters),
+            };
             run_lifecycle(&command, environment)?;
             Ok(CommandOutput::None)
         }
@@ -483,6 +493,40 @@ fn dispatch(
             Ok(CommandOutput::None)
         }
     }
+}
+
+fn parse_run_parameters(values: Vec<String>) -> Result<BTreeMap<String, String>, CommandError> {
+    let mut parameters = BTreeMap::new();
+    for value in values {
+        let Some((id, value)) = value.split_once('=') else {
+            return Err(CommandError::Syntax {
+                context: format!(
+                    "start: parameter '{value}' должен иметь форму <parameter-id>=<value>"
+                ),
+            });
+        };
+        if !is_symbolic_id(id) {
+            return Err(CommandError::Syntax {
+                context: format!("start: ParameterId '{id}' не соответствует kebab-case"),
+            });
+        }
+        if parameters.insert(id.to_owned(), value.to_owned()).is_some() {
+            return Err(CommandError::Syntax {
+                context: format!("start: ParameterId '{id}' передан повторно"),
+            });
+        }
+    }
+    Ok(parameters)
+}
+
+fn is_symbolic_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
 }
 
 #[derive(Clone, Copy)]

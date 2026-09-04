@@ -43,6 +43,10 @@ harness = false
 name = "workflow_tools"
 harness = false
 
+[[test]]
+name = "process_execution"
+harness = false
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

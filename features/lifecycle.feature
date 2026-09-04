@@ -9,6 +9,7 @@ Feature: Durable lifecycle run
       When workflow запускается через lifecycle API с возвратом без completion
       Then lifecycle завершается с кодом 1
       And до вызова Agent опубликованы spec и initial attempt 0
+      And RunId является десятичным Unix timestamp создания в миллисекундах
       And initial attempt остаётся незавершённым
 
     @process
@@ -31,12 +32,12 @@ Feature: Durable lifecycle run
   @cli:resume @format:agent-attempt-record @spec:native-resume @spec:control-endpoint-и-события
   Rule: Session activation сохраняется в durable-порядке
 
-    Scenario: Resume использует последнюю отличающуюся native session
+    Scenario: Resume использует последнюю отличающуюся непрозрачную native session
       Given подготовлен single-step workflow без outputs
-      When Agent активирует sessions a, b, a, a и возвращается без completion
+      When Agent активирует opaque sessions vendor/a:1, vendor/b:2, vendor/a:1, vendor/a:1 и возвращается без completion
       And run продолжается через lifecycle API
-      Then resume запускает тот же attempt 0 с session a
-      And durable activations равны a, b, a
+      Then resume запускает тот же attempt 0 с session vendor/a:1
+      And durable activations равны vendor/a:1, vendor/b:2, vendor/a:1
 
     @process
     Scenario: Process Agent сохраняет session через дочернюю CLI-команду

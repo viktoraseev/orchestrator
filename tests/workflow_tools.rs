@@ -184,7 +184,9 @@ fn stdout_empty(world: &mut WorkflowToolWorld) {
     assert!(world.observed().stdout.is_empty());
 }
 
-#[then("typed bulk report содержит invalid alpha и valid beta по порядку")]
+#[then(
+    "typed bulk report равен invalid alpha с diagnostics и valid beta без diagnostics по порядку"
+)]
 fn typed_bulk_report(world: &mut WorkflowToolWorld) {
     let report = world.report.as_ref().expect("bulk report must exist");
     assert_eq!(report.workflows().len(), 2);
@@ -193,18 +195,31 @@ fn typed_bulk_report(world: &mut WorkflowToolWorld) {
     assert!(report.workflows()[0].diagnostics()[0].contains("steps должен быть непустым"));
     assert_eq!(report.workflows()[1].workflow(), "beta");
     assert!(report.workflows()[1].is_valid());
+    assert!(report.workflows()[1].diagnostics().is_empty());
 }
 
-#[then("JSON bulk report содержит alpha и beta по порядку")]
+#[then("JSON bulk report равен invalid alpha и valid beta по порядку")]
 fn json_bulk_report(world: &mut WorkflowToolWorld) {
     let value = world.json();
     assert_eq!(value["workflows"][0]["workflow"], "alpha");
     assert_eq!(value["workflows"][0]["valid"], false);
     assert_eq!(value["workflows"][1]["workflow"], "beta");
     assert_eq!(value["workflows"][1]["valid"], true);
+    assert_eq!(value["workflows"].as_array().map(Vec::len), Some(2));
 }
 
-#[then("typed graph содержит bootstrap plan и edge plan to implement")]
+#[then("bulk report text содержит invalid alpha перед valid beta")]
+fn text_bulk_report(world: &mut WorkflowToolWorld) {
+    let lines = world.stdout().lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("workflow alpha: invalid: "));
+    assert!(lines[0].contains("steps должен быть непустым"));
+    assert_eq!(lines[1], "workflow beta: valid");
+}
+
+#[then(
+    "typed graph равен workflow delivery, bootstrap plan, nodes plan и implement, edge plan to implement"
+)]
 fn typed_graph(world: &mut WorkflowToolWorld) {
     let graph = world.graph.as_ref().expect("graph must exist");
     assert_eq!(graph.workflow(), "delivery");
@@ -215,23 +230,35 @@ fn typed_graph(world: &mut WorkflowToolWorld) {
     assert_eq!(graph.edges()[0].to(), "implement");
 }
 
-#[then("graph text содержит header bootstrap и edge")]
+#[then(
+    "graph text состоит из absolute path workflow delivery, bootstrap plan и edge plan to implement"
+)]
 fn graph_text(world: &mut WorkflowToolWorld) {
-    let stdout = world.stdout();
-    assert!(stdout.lines().next().is_some_and(|line| {
+    let lines = world.stdout().lines().collect::<Vec<_>>();
+    assert!(lines.first().is_some_and(|line| {
         line.starts_with("workflow delivery: path=/") && line.ends_with("/workflow/delivery.yaml")
     }));
-    assert!(stdout.contains("\nbootstrap: plan\nplan -> implement\n"));
+    assert_eq!(lines.get(1), Some(&"bootstrap: plan"));
+    assert_eq!(lines.get(2), Some(&"plan -> implement"));
+    assert_eq!(lines.len(), 3);
 }
 
-#[then("JSON graph содержит nodes и edge")]
+#[then(
+    "JSON graph равен workflow delivery, absolute path, bootstrap plan, nodes plan и implement, edge plan to implement"
+)]
 fn json_graph(world: &mut WorkflowToolWorld) {
     let value = world.json();
+    assert_eq!(value["workflow"], "delivery");
+    assert!(value["path"].as_str().is_some_and(
+        |path| Path::new(path).is_absolute() && path.ends_with("/workflow/delivery.yaml")
+    ));
     assert_eq!(value["bootstrap"], "plan");
     assert_eq!(value["nodes"][0], "plan");
     assert_eq!(value["nodes"][1], "implement");
+    assert_eq!(value["nodes"].as_array().map(Vec::len), Some(2));
     assert_eq!(value["edges"][0]["from"], "plan");
     assert_eq!(value["edges"][0]["to"], "implement");
+    assert_eq!(value["edges"].as_array().map(Vec::len), Some(1));
 }
 
 #[then("typed plan содержит effective Agent и prompt content")]
@@ -239,8 +266,11 @@ fn typed_plan(world: &mut WorkflowToolWorld) {
     let plan = world.plan.as_ref().expect("plan must exist");
     assert_eq!(plan.workflow_id(), "delivery");
     assert_eq!(plan.max_parallel_agents(), 7);
-    assert_eq!(plan.steps()[0].agent().agent_type(), "codex");
-    assert_eq!(plan.steps()[0].agent().model(), "gpt-test");
+    let agent = plan.steps()[0]
+        .agent()
+        .expect("Agent Step must contain Agent");
+    assert_eq!(agent.agent_type(), "codex");
+    assert_eq!(agent.model(), "gpt-test");
     assert_eq!(plan.steps()[0].prompt(), Some("SECRET PLAN"));
     assert_eq!(plan.steps()[1].prompt(), Some("{{content:plan:spec}}"));
 }
@@ -334,6 +364,8 @@ fn environment(root: &Path) -> ProcessEnvironment {
     ProcessEnvironment {
         home: None,
         orc_home: Some(root.as_os_str().to_owned()),
+        current_dir: None,
+        path: None,
     }
 }
 

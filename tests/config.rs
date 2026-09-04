@@ -9,7 +9,9 @@ use tempfile::TempDir;
 #[derive(Debug, Default, World)]
 struct ConfigWorld {
     root: Option<TempDir>,
+    home: Option<TempDir>,
     relative_orc_home: bool,
+    empty_orc_home: bool,
     output: Option<Output>,
     initial_config: Option<Vec<u8>>,
     concurrent_outputs: Vec<Output>,
@@ -25,11 +27,78 @@ fn relative_orc_home(world: &mut ConfigWorld) {
     world.relative_orc_home = true;
 }
 
+#[given("HOME содержит лимит 7, а абсолютный ORC_HOME содержит лимит 11")]
+fn absolute_orc_home_replaces_home(world: &mut ConfigWorld) {
+    let home = TempDir::new().expect("test HOME must be created");
+    fs::create_dir(home.path().join(".orc")).expect("default state root must be created");
+    fs::write(
+        home.path().join(".orc/config.yaml"),
+        "max-parallel-agents: 7\n",
+    )
+    .expect("default config must be written");
+    let root = TempDir::new().expect("ORC_HOME must be created");
+    fs::write(root.path().join("config.yaml"), "max-parallel-agents: 11\n")
+        .expect("override config must be written");
+    world.home = Some(home);
+    world.root = Some(root);
+}
+
+#[given("HOME содержит лимит 7, а ORC_HOME пуст")]
+fn empty_orc_home_uses_home(world: &mut ConfigWorld) {
+    let home = TempDir::new().expect("test HOME must be created");
+    fs::create_dir(home.path().join(".orc")).expect("default state root must be created");
+    fs::write(
+        home.path().join(".orc/config.yaml"),
+        "max-parallel-agents: 7\n",
+    )
+    .expect("default config must be written");
+    world.home = Some(home);
+    world.empty_orc_home = true;
+}
+
 #[given("config.yaml с неизвестным полем")]
 fn config_with_unknown_field(world: &mut ConfigWorld) {
     let root = TempDir::new().expect("test root must be created");
     fs::write(root.path().join("config.yaml"), "unknown: true\n")
         .expect("test config must be written");
+    world.root = Some(root);
+}
+
+#[given(expr = "config.yaml с нарушением schema {string}")]
+#[allow(clippy::needless_pass_by_value)]
+fn config_with_schema_violation(world: &mut ConfigWorld, case: String) {
+    let contents = match case.as_str() {
+        "duplicate root field" => "max-parallel-agents: 7\nmax-parallel-agents: 9\n",
+        "default-workflow is not string" => "default-workflow: 7\n",
+        "default-agent has repeated hyphen" => "default-agent: bad--agent\n",
+        "max-parallel-agents is zero" => "max-parallel-agents: 0\n",
+        "agents is not mapping" => "agents: []\n",
+        "AgentId contains dot" => {
+            "agents:\n  bad.agent:\n    type: codex\n    model: valid\n    reasoning: high\n"
+        }
+        "Agent misses type" => "agents:\n  main:\n    model: valid\n    reasoning: high\n",
+        "Agent model is not string" => {
+            "agents:\n  main:\n    type: codex\n    model: 7\n    reasoning: high\n"
+        }
+        "Agent has command field" => {
+            "agents:\n  main:\n    type: codex\n    model: valid\n    reasoning: high\n    command: tool\n"
+        }
+        "Agent has environment field" => {
+            "agents:\n  main:\n    type: codex\n    model: valid\n    reasoning: high\n    environment: {}\n"
+        }
+        "Agent type is unknown" => {
+            "agents:\n  main:\n    type: unknown\n    model: valid\n    reasoning: high\n"
+        }
+        "Agent model is invalid" => {
+            "agents:\n  main:\n    type: codex\n    model: ''\n    reasoning: high\n"
+        }
+        "Agent reasoning is invalid" => {
+            "agents:\n  main:\n    type: codex\n    model: valid\n    reasoning: ''\n"
+        }
+        other => panic!("unsupported config schema case: {other}"),
+    };
+    let root = TempDir::new().expect("test root must be created");
+    fs::write(root.path().join("config.yaml"), contents).expect("test config must be written");
     world.root = Some(root);
 }
 
@@ -184,11 +253,21 @@ fn stdout_equals(world: &mut ConfigWorld, expected: String) {
     assert_eq!(text(&world.output().stdout), format!("{expected}\n"));
 }
 
-#[then("stdout содержит эффективную конфигурацию по умолчанию")]
+#[then("stdout равен строкам default-workflow null, default-agent null и max-parallel-agents 5")]
 fn stdout_contains_default_config(world: &mut ConfigWorld) {
     assert_eq!(
         text(&world.output().stdout),
         "default-workflow: null\ndefault-agent: null\nmax-parallel-agents: 5\n"
+    );
+}
+
+#[then(
+    "stdout равен строкам default-workflow delivery, default-agent codex-main и max-parallel-agents 7"
+)]
+fn stdout_contains_complete_config(world: &mut ConfigWorld) {
+    assert_eq!(
+        text(&world.output().stdout),
+        "default-workflow: delivery\ndefault-agent: codex-main\nmax-parallel-agents: 7\n"
     );
 }
 
@@ -287,8 +366,13 @@ fn final_limit_is_one_candidate(world: &mut ConfigWorld) {
 fn run(world: &mut ConfigWorld, arguments: &[&str]) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orchestrator"));
     command.args(arguments);
+    if let Some(home) = &world.home {
+        command.env("HOME", home.path());
+    }
     if world.relative_orc_home {
         command.env("ORC_HOME", "relative");
+    } else if world.empty_orc_home {
+        command.env("ORC_HOME", "");
     } else {
         let root = world.root.as_ref().expect("scenario must define a root");
         command.env("ORC_HOME", root.path());

@@ -5,6 +5,8 @@
 ## Модель graph
 
 - **Workflow** — ориентированный граф Steps. До создания run source workflow, prompt templates и Agents проверяются и materialize’ятся в кандидат snapshot в памяти; `start` durable-публикует проверенный кандидат только после резервирования run. Изменение source files после публикации не меняет run. Порядок Steps сохраняется и является частью scheduling.
+- **Run parameter** — объявленное workflow строковое значение, которое `start` получает явно, проверяет до резервирования run и сохраняет в materialized workflow; Process args каждого attempt используют одно и то же durable значение.
+- **Step executor** — ровно один из Agent или Process; Agent adapter владеет native session protocol, а Process запускает materialized executable с argv и не является Agent type.
 - **Step** — узел графа. `depends-on` перечисляет source Steps, успешное завершение которых требуется для activation. Зависимостей от отдельных artifacts нет.
 - **Input mapping** принадлежит конкретному target attempt и использует пару `(source-step-id, input-id)` как ключ artifact: StepId определяет выбранный source Step, а InputId — один из объявленных им `outputs`. Отдельной сущности Input с собственным ID нет.
 - **Artifact в graph** имеет ключ `(attempt-n, step-id, input-id)`. Все версии хранятся для истории. К inputs доступен только artifact успешно завершённого source attempt.
@@ -31,7 +33,7 @@ Frontier — вычисляемое множество ready Steps. Один Ste
 
 Input activation содержит по одному выбранному source attempt для каждого StepId из `depends-on`. Все объявленные `outputs` выбранного source attempt передаются target Step как mapping `(step-id, input-id) → artifact path`. Именно в этом mapping пара является ключом. InputIds разных source Steps могут совпадать, поскольку StepId устраняет неоднозначность.
 
-Agent type получает этот mapping вместе с materialized Agent и сформированным prompt. Placeholders Markdown template разрешаются из того же неизменяемого mapping по правилам `format.spec.md`. Позднее появившиеся версии artifacts не изменяют ни mapping, ни prompt уже созданного attempt.
+Agent type получает mapping вместе с materialized Agent и сформированным prompt. Позднее появившиеся версии artifacts не изменяют mapping, prompt или argv уже запущенного attempt.
 
 ## Циклы, terminal и blocked run
 
@@ -45,7 +47,7 @@ Step terminal, если ни один Step не содержит его ID в `d
 
 ## Планирование
 
-В одном run могут одновременно существовать attempts разных Steps; положительный `max-parallel-agents` из materialized workflow ограничивает общее число работающих процессов агентов, включая human и процессы native resume.
+В одном run могут одновременно существовать attempts разных Steps; положительный `max-parallel-agents` из materialized workflow ограничивает общее число одновременно работающих Agent и Process executors, включая human и процессы native resume.
 
 На scheduling pass запускаемой работой являются ready activations и незавершённые attempts, которые текущая команда ещё не запускала; возврат процесса без completion не ставит тот же attempt в запускаемую работу повторно до следующего явного `resume` по правилам `SPEC.md`.
 
@@ -53,7 +55,7 @@ Step terminal, если ни один Step не содержит его ID в `d
 - Если human attempt не работает, есть запускаемая human-работа и свободен хотя бы один слот, но у lifecycle-команды нет TTY, supervisor не запускает никакую новую работу этого scheduling pass и завершает команду runtime fail-fast с кодом `1`; headless-запуск human attempt запрещён.
 - Одновременно выполняется не более одного human attempt. Если human attempt не работает, есть запускаемая human-работа, свободен хотя бы один слот и доступен TTY, supervisor первым выбирает работу Step, раньше описанного в materialized workflow; на время работы его процесс эксклюзивно занимает TTY команды, а остальная human-работа ожидает.
 - Оставшиеся свободные слоты заполняются запускаемой non-human-работой в порядке materialized workflow; не выбранная из-за лимита работа ожидает следующего scheduling pass.
-- Non-human attempts работают параллельно с human attempt без доступа к TTY и без вывода сырого live-потока в терминал. Выбранные новые activations одного scheduling pass сортируются по порядку Steps и получают глобальные attempt numbers в этом порядке; native resume сохраняет прежний `n`.
+- Non-human attempts работают параллельно с human attempt без доступа к TTY и без вывода сырого live-потока в терминал. Выбранные новые activations одного scheduling pass сортируются по порядку Steps; native resume сохраняет прежний `n`.
 - После durable-изменения, влияющего на frontier или незавершённые attempts, выполняется следующий scheduling pass.
 - После `/exit` human attempt supervisor входит в user shutdown и больше не запускает работу из frontier или незавершённых attempts; возвраты уже работающих non-human процессов по-прежнему изменяют durable-модель, но появившаяся вследствие них ready-работа остаётся для следующего явного `resume`.
 
@@ -62,6 +64,7 @@ Step terminal, если ни один Step не содержит его ID в `d
 `validate` и preflight `start` независимо от способа выбора полностью materialize’ят в памяти и проверяют кандидат выбранного workflow:
 
 - соответствие workflow и prompt templates `format.spec.md`;
+- корректность ParameterIds, Process executable, cwd, args, stdout и ссылок Process placeholders;
 - существование явного Agent каждого Step либо `default-agent`, валидность его type, model и reasoning и поддержку native resume Agent type;
 - существование всех StepIds из `depends-on` и всех PromptIds;
 - отсутствие любых placeholders в prompt template первого описанного Step;
@@ -72,9 +75,7 @@ Step terminal, если ни один Step не содержит его ID в `d
 
 Preflight не записывает snapshot в run: `validate` завершает работу после проверки кандидата, а `start` durable-публикует его только после резервирования run по `format.spec.md`. Во время выполнения статическая reachability повторно не вычисляется.
 
-- `validate --all` применяет полный preflight независимо к каждому WorkflowId из детерминированного source catalog и сохраняет ошибки отдельных кандидатов в полном отчёте.
-- `workflow graph` проверяет source structure, dependency references и статическую reachability без разрешения Agent и Prompt references и представляет initial activation первого Step как bootstrap graph fact.
-- `workflow plan` возвращает полностью materialized кандидат с effective Agents, prompt content и parallel limit через ту же validation boundary, что `start`, но не резервирует и не публикует run.
+- `workflow plan` возвращает validated кандидат с объявлениями parameters, effective Agent или Process executor, prompt content и parallel limit через ту же validation boundary, что `start`, но без runtime parameter values, резервирования или публикации run.
 
 ## Fail-fast input validation
 

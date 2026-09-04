@@ -1,6 +1,6 @@
 //! Read-only catalogs source workflows, named Agents и prompt templates; модуль не materialize'ит workflows и не изменяет state root.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::agent::BuiltinAgentRegistry;
 use crate::config::{CommandError, ProcessEnvironment, read_config, resolve_state_root};
 use crate::run::InspectionFormat;
-use crate::workflow::{RawStep, RawWorkflow, SymbolicId};
+use crate::workflow::{RawProcess, RawStep, RawWorkflow, SymbolicId};
 
 /// Descriptor source workflow template.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -40,6 +40,7 @@ impl WorkflowCatalogEntry {
 pub struct SourceWorkflow {
     workflow: String,
     path: String,
+    parameters: Vec<String>,
     steps: Vec<SourceWorkflowStep>,
 }
 
@@ -54,6 +55,12 @@ impl SourceWorkflow {
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Возвращает объявленные `ParameterIds` в детерминированном порядке.
+    #[must_use]
+    pub fn parameters(&self) -> &[String] {
+        &self.parameters
     }
 
     /// Возвращает Steps в исходном YAML order.
@@ -71,8 +78,45 @@ pub struct SourceWorkflowStep {
     agent: Option<String>,
     prompt: Option<String>,
     human: bool,
+    process: Option<SourceWorkflowProcess>,
     depends_on: Vec<String>,
     outputs: Vec<String>,
+}
+
+/// Source Process executor без разрешения executable и placeholders.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct SourceWorkflowProcess {
+    executable: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    stdout: Option<String>,
+}
+
+impl SourceWorkflowProcess {
+    /// Возвращает source executable.
+    #[must_use]
+    pub fn executable(&self) -> &str {
+        &self.executable
+    }
+
+    /// Возвращает source argv templates.
+    #[must_use]
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// Возвращает optional source cwd.
+    #[must_use]
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    /// Возвращает optional stdout output.
+    #[must_use]
+    pub fn stdout(&self) -> Option<&str> {
+        self.stdout.as_deref()
+    }
 }
 
 impl SourceWorkflowStep {
@@ -98,6 +142,12 @@ impl SourceWorkflowStep {
     #[must_use]
     pub const fn is_human(&self) -> bool {
         self.human
+    }
+
+    /// Возвращает source Process executor.
+    #[must_use]
+    pub const fn process(&self) -> Option<&SourceWorkflowProcess> {
+        self.process.as_ref()
     }
 
     /// Возвращает source dependencies в исходном order.
@@ -274,10 +324,12 @@ pub fn show_workflow(
         serde_yaml::from_slice(&bytes).map_err(|source| CommandError::Invalid {
             context: format!("workflow show: невалидный workflow '{workflow}': {source}"),
         })?;
+    let parameters = validate_source_parameters(&workflow, raw.parameters)?;
     let steps = validate_source_steps(&workflow, raw.steps)?;
     Ok(SourceWorkflow {
         workflow,
         path: catalog_path_string(&path, "workflow show")?,
+        parameters,
         steps,
     })
 }
@@ -507,19 +559,148 @@ fn validate_source_steps(
             .prompt
             .map(|value| parse_source_id(workflow, index, "PromptId", &value))
             .transpose()?;
+        let process = raw
+            .process
+            .map(|process| validate_source_process(workflow, &id, process))
+            .transpose()?;
+        if process.is_some() && (agent.is_some() || prompt.is_some() || raw.human) {
+            return Err(invalid_source_step(
+                workflow,
+                &id,
+                "Process Step несовместим с agent, prompt и human: true",
+            ));
+        }
         let depends_on =
             parse_source_ids(workflow, index, &id, "depends-on", "StepId", raw.depends_on)?;
         let outputs = parse_source_ids(workflow, index, &id, "outputs", "InputId", raw.outputs)?;
+        if let Some(stdout) = process.as_ref().and_then(SourceWorkflowProcess::stdout)
+            && !outputs.iter().any(|output| output == stdout)
+        {
+            return Err(invalid_source_step(
+                workflow,
+                &id,
+                &format!("Process stdout ссылается на неизвестный output '{stdout}'"),
+            ));
+        }
         steps.push(SourceWorkflowStep {
             id,
             agent,
             prompt,
             human: raw.human,
+            process,
             depends_on,
             outputs,
         });
     }
     Ok(steps)
+}
+
+fn validate_source_parameters(
+    workflow: &str,
+    parameters: BTreeMap<String, String>,
+) -> Result<Vec<String>, CommandError> {
+    parameters
+        .into_iter()
+        .map(|(id, parameter_type)| {
+            let id = SymbolicId::parse("ParameterId", &id)
+                .map_err(|message| invalid_source_workflow(workflow, &message))?;
+            if parameter_type != "string" {
+                return Err(invalid_source_workflow(
+                    workflow,
+                    &format!(
+                        "Parameter '{}' имеет неподдерживаемый type '{parameter_type}'",
+                        id.as_str()
+                    ),
+                ));
+            }
+            Ok(id.into_string())
+        })
+        .collect()
+}
+
+fn validate_source_process(
+    workflow: &str,
+    step_id: &str,
+    process: RawProcess,
+) -> Result<SourceWorkflowProcess, CommandError> {
+    if process.executable.is_empty()
+        || process.executable.contains('\0')
+        || process.executable.contains("{{")
+        || process.executable.contains("}}")
+    {
+        return Err(invalid_source_step(
+            workflow,
+            step_id,
+            "Process executable должен быть непустой строкой без NUL и placeholders",
+        ));
+    }
+    if process.cwd.as_ref().is_some_and(|cwd| {
+        cwd.is_empty() || cwd.contains('\0') || cwd.contains("{{") || cwd.contains("}}")
+    }) {
+        return Err(invalid_source_step(
+            workflow,
+            step_id,
+            "Process cwd должен быть непустой строкой без NUL и placeholders",
+        ));
+    }
+    if process.args.iter().any(|argument| argument.contains('\0')) {
+        return Err(invalid_source_step(
+            workflow,
+            step_id,
+            "Process args не могут содержать NUL",
+        ));
+    }
+    for argument in &process.args {
+        validate_source_process_argument(workflow, step_id, argument)?;
+    }
+    let stdout = process
+        .stdout
+        .map(|value| SymbolicId::parse("InputId", &value).map(SymbolicId::into_string))
+        .transpose()
+        .map_err(|message| invalid_source_step(workflow, step_id, &message))?;
+    Ok(SourceWorkflowProcess {
+        executable: process.executable,
+        args: process.args,
+        cwd: process.cwd,
+        stdout,
+    })
+}
+
+fn validate_source_process_argument(
+    workflow: &str,
+    step_id: &str,
+    argument: &str,
+) -> Result<(), CommandError> {
+    if !argument.contains("{{") && !argument.contains("}}") {
+        return Ok(());
+    }
+    let body = argument
+        .strip_prefix("{{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .ok_or_else(|| {
+            invalid_source_step(
+                workflow,
+                step_id,
+                "Process placeholder должен занимать весь argv element",
+            )
+        })?;
+    let parts = body.split(':').collect::<Vec<_>>();
+    let ids_are_valid = match parts.as_slice() {
+        ["param" | "output", parameter] => SymbolicId::parse("InputId", parameter).is_ok(),
+        ["path", step, input] => {
+            SymbolicId::parse("StepId", step).is_ok() && SymbolicId::parse("InputId", input).is_ok()
+        }
+        _ => false,
+    };
+    if ids_are_valid {
+        Ok(())
+    } else {
+        Err(invalid_source_step(
+            workflow,
+            step_id,
+            &format!("невалидный Process placeholder '{{{{{body}}}}}'"),
+        ))
+    }
 }
 
 fn parse_source_ids(
@@ -609,17 +790,32 @@ fn render_source_workflow(workflow: &SourceWorkflow) -> Result<String, CommandEr
     )
     .map_err(text_format_error)?;
     for step in &workflow.steps {
-        writeln!(
-            output,
-            "step {}: agent={} prompt={} human={} depends-on={} outputs={}",
-            step.id,
-            step.agent.as_deref().unwrap_or("-"),
-            step.prompt.as_deref().unwrap_or("-"),
-            step.human,
-            joined_or_dash(&step.depends_on),
-            joined_or_dash(&step.outputs)
-        )
-        .map_err(text_format_error)?;
+        if let Some(process) = &step.process {
+            writeln!(
+                output,
+                "step {}: process={} args={} cwd={} stdout={} depends-on={} outputs={}",
+                step.id,
+                process.executable,
+                process.args.len(),
+                process.cwd.as_deref().unwrap_or("-"),
+                process.stdout.as_deref().unwrap_or("-"),
+                joined_or_dash(&step.depends_on),
+                joined_or_dash(&step.outputs)
+            )
+            .map_err(text_format_error)?;
+        } else {
+            writeln!(
+                output,
+                "step {}: agent={} prompt={} human={} depends-on={} outputs={}",
+                step.id,
+                step.agent.as_deref().unwrap_or("-"),
+                step.prompt.as_deref().unwrap_or("-"),
+                step.human,
+                joined_or_dash(&step.depends_on),
+                joined_or_dash(&step.outputs)
+            )
+            .map_err(text_format_error)?;
+        }
     }
     output.pop();
     Ok(output)

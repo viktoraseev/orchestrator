@@ -94,6 +94,17 @@ fn validate_through_process(world: &mut ValidationWorld, workflow_id: String) {
     world.outcome = Some(observe_process(&output));
 }
 
+#[when("запускается orchestrator validate delivery extra")]
+fn validate_two_workflows_through_process(world: &mut ValidationWorld) {
+    let root = world.root.as_ref().expect("scenario must define a root");
+    let output = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["validate", "delivery", "extra"])
+        .env("ORC_HOME", root.path())
+        .output()
+        .expect("orchestrator must run");
+    world.outcome = Some(observe_process(&output));
+}
+
 #[when("запускается orchestrator validate без аргумента")]
 fn validate_default_through_process(world: &mut ValidationWorld) {
     let root = world.root.as_ref().expect("scenario must define a root");
@@ -187,6 +198,8 @@ fn environment(world: &ValidationWorld) -> ProcessEnvironment {
     ProcessEnvironment {
         home: None,
         orc_home: Some(root.path().as_os_str().to_owned()),
+        current_dir: None,
+        path: None,
     }
 }
 
@@ -255,6 +268,18 @@ fn prepare_candidate(root: &std::path::Path, candidate: &str) {
         "невалидный StepId" => write_workflow(
             root,
             "steps:\n  - id: Bad-ID\n    human: false\n    depends-on: []\n    outputs: []\n",
+        ),
+        "невалидный ParameterId с точкой" => write_workflow(
+            root,
+            "parameters:\n  bad.parameter: string\nsteps:\n  - id: plan\n    human: false\n    depends-on: []\n    outputs: []\n",
+        ),
+        "невалидный InputId с точкой" => write_workflow(
+            root,
+            "steps:\n  - id: plan\n    human: false\n    depends-on: []\n    outputs: [bad.output]\n",
+        ),
+        "невалидный PromptId с точкой" => write_workflow(
+            root,
+            "steps:\n  - id: plan\n    prompt: bad.prompt\n    human: false\n    depends-on: []\n    outputs: []\n",
         ),
         "синтаксически невалидный YAML" => {
             write_workflow(root, "steps: [\n");

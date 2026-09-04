@@ -20,10 +20,22 @@ Feature: Конфигурация orchestrator
       Given изолированный корень состояния без config.yaml
       When я выполняю config list
       Then команда завершается с кодом 0
-      And stdout содержит эффективную конфигурацию по умолчанию
+      And stdout равен строкам default-workflow null, default-agent null и max-parallel-agents 5
 
   @cli:корень-состояния-и-переменные-окружения @process
   Rule: ORC_HOME целиком задаёт корень состояния
+
+    Scenario: Абсолютный ORC_HOME заменяет корень из HOME
+      Given HOME содержит лимит 7, а абсолютный ORC_HOME содержит лимит 11
+      When я выполняю config get max-parallel-agents
+      Then команда завершается с кодом 0
+      And stdout равен строке "11"
+
+    Scenario: Пустой ORC_HOME не заменяет корень из HOME
+      Given HOME содержит лимит 7, а ORC_HOME пуст
+      When я выполняю config get max-parallel-agents
+      Then команда завершается с кодом 0
+      And stdout равен строке "7"
 
     Scenario: Относительный ORC_HOME отклоняется
       Given относительный ORC_HOME
@@ -33,6 +45,12 @@ Feature: Конфигурация orchestrator
 
   @cli:config-get-config-set-и-config-list @format:config-yaml @process
   Rule: Ошибки config-команд не маскируются значениями по умолчанию
+
+    Scenario: Config со всеми четырьмя поддерживаемыми полями валиден
+      Given config.yaml со всеми поддерживаемыми полями
+      When я выполняю config list
+      Then команда завершается с кодом 0
+      And stdout равен строкам default-workflow delivery, default-agent codex-main и max-parallel-agents 7
 
     Scenario: Неизвестный ключ отклоняется CLI parser
       Given изолированный корень состояния без config.yaml
@@ -44,6 +62,28 @@ Feature: Конфигурация orchestrator
       When я выполняю config list
       Then команда завершается с кодом 3
       And stderr начинается с "error: config:"
+
+    Scenario Outline: Config schema и Agent registry проверяются целиком
+      Given config.yaml с нарушением schema "<case>"
+      When я выполняю config list
+      Then команда завершается с кодом 3
+      And stderr начинается с "error: config:"
+
+      Examples:
+        | case |
+        | duplicate root field |
+        | default-workflow is not string |
+        | default-agent has repeated hyphen |
+        | max-parallel-agents is zero |
+        | agents is not mapping |
+        | AgentId contains dot |
+        | Agent misses type |
+        | Agent model is not string |
+        | Agent has command field |
+        | Agent has environment field |
+        | Agent type is unknown |
+        | Agent model is invalid |
+        | Agent reasoning is invalid |
 
   @cli:config-get-config-set-и-config-list @format:config-yaml @process
   Rule: max-parallel-agents изменяется атомарно

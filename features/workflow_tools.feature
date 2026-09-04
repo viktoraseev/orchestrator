@@ -7,7 +7,7 @@ Feature: Read-only workflow tooling
       Given подготовлен workflow catalog с valid beta и invalid alpha
       When все workflows проверяются через публичный API
       Then workflow tool завершается с кодом 3
-      And typed bulk report содержит invalid alpha и valid beta по порядку
+      And typed bulk report равен invalid alpha с diagnostics и valid beta без diagnostics по порядку
       And каталог run отсутствует после workflow tool
 
     @process
@@ -15,7 +15,14 @@ Feature: Read-only workflow tooling
       Given подготовлен workflow catalog с valid beta и invalid alpha
       When запускается orchestrator validate --all в JSON
       Then workflow tool завершается с кодом 3
-      And JSON bulk report содержит alpha и beta по порядку
+      And JSON bulk report равен invalid alpha и valid beta по порядку
+
+    @process
+    Scenario: Bulk validate text публикуется полностью перед кодом 3
+      Given подготовлен workflow catalog с valid beta и invalid alpha
+      When запускается orchestrator validate --all
+      Then workflow tool завершается с кодом 3
+      And bulk report text содержит invalid alpha перед valid beta
 
     @process
     Scenario: Пустой workflow catalog даёт успешный пустой отчёт
@@ -45,7 +52,7 @@ Feature: Read-only workflow tooling
       Given подготовлен source graph delivery без config и prompts
       When graph delivery строится через публичный API
       Then workflow tool завершается с кодом 0
-      And typed graph содержит bootstrap plan и edge plan to implement
+      And typed graph равен workflow delivery, bootstrap plan, nodes plan и implement, edge plan to implement
       And каталог run отсутствует после workflow tool
 
     @process
@@ -53,14 +60,14 @@ Feature: Read-only workflow tooling
       Given подготовлен source graph delivery без config и prompts
       When запускается orchestrator workflow graph delivery
       Then workflow tool завершается с кодом 0
-      And graph text содержит header bootstrap и edge
+      And graph text состоит из absolute path workflow delivery, bootstrap plan и edge plan to implement
 
     @process
     Scenario: Workflow graph JSON возвращает typed object
       Given подготовлен source graph delivery без config и prompts
       When запускается orchestrator workflow graph delivery в JSON
       Then workflow tool завершается с кодом 0
-      And JSON graph содержит nodes и edge
+      And JSON graph равен workflow delivery, absolute path, bootstrap plan, nodes plan и implement, edge plan to implement
 
     @process
     Scenario: Статически недостижимый source graph не даёт stdout

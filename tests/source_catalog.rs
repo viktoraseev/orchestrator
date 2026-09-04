@@ -55,6 +55,15 @@ fn invalid_workflow_id(world: &mut CatalogWorld) {
     fs::write(directory.join("Bad-ID.yaml"), b"steps: []\n").expect("workflow must be written");
 }
 
+#[given("подготовлен workflow contract path, который является directory")]
+fn non_regular_workflow(world: &mut CatalogWorld) {
+    empty_root(world);
+    let directory = world.root().join("workflow");
+    fs::create_dir(&directory).expect("workflow directory must be created");
+    fs::create_dir(directory.join("nested.yaml"))
+        .expect("workflow contract directory must be created");
+}
+
 #[given("подготовлен config с Agents beta и alpha")]
 fn agent_config(world: &mut CatalogWorld) {
     empty_root(world);
@@ -72,7 +81,7 @@ fn invalid_agent_config(world: &mut CatalogWorld) {
         .expect("invalid config must be written");
 }
 
-#[given("подготовлен prompt template unicode")]
+#[given("подготовлен prompt template unicode с содержимым Привет")]
 fn unicode_prompt(world: &mut CatalogWorld) {
     empty_root(world);
     let directory = world.root().join("prompt");
@@ -96,6 +105,22 @@ fn non_utf8_prompt(world: &mut CatalogWorld) {
     let directory = world.root().join("prompt");
     fs::create_dir(&directory).expect("prompt directory must be created");
     fs::write(directory.join("binary.md"), [0xff, 0xfe]).expect("prompt must be written");
+}
+
+#[given("подготовлен prompt contract file с невалидным ID")]
+fn invalid_prompt_id(world: &mut CatalogWorld) {
+    empty_root(world);
+    let directory = world.root().join("prompt");
+    fs::create_dir(&directory).expect("prompt directory must be created");
+    fs::write(directory.join("Bad-ID.md"), "prompt").expect("prompt must be written");
+}
+
+#[given("подготовлен prompt contract path, который является directory")]
+fn non_regular_prompt(world: &mut CatalogWorld) {
+    empty_root(world);
+    let directory = world.root().join("prompt");
+    fs::create_dir(&directory).expect("prompt directory must be created");
+    fs::create_dir(directory.join("nested.md")).expect("prompt contract directory must be created");
 }
 
 #[given("подготовлен source workflow demo с несуществующими Agent и prompt references")]
@@ -249,6 +274,11 @@ fn missing_workflow_show_cli(world: &mut CatalogWorld) {
     run_cli(world, &["workflow", "show", "missing"]);
 }
 
+#[when("запускается orchestrator workflow show с невалидным ID")]
+fn invalid_workflow_show_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["workflow", "show", "Bad.ID"]);
+}
+
 #[when("запускается orchestrator agent show beta в JSON")]
 fn agent_show_json_cli(world: &mut CatalogWorld) {
     run_cli(world, &["agent", "show", "beta", "--format", "json"]);
@@ -284,6 +314,11 @@ fn missing_prompt_show_cli(world: &mut CatalogWorld) {
     run_cli(world, &["prompt", "show", "missing"]);
 }
 
+#[when("запускается orchestrator prompt show с невалидным ID")]
+fn invalid_prompt_show_cli(world: &mut CatalogWorld) {
+    run_cli(world, &["prompt", "show", "Bad.ID"]);
+}
+
 #[when("запускается orchestrator prompt show binary")]
 fn non_utf8_prompt_show_cli(world: &mut CatalogWorld) {
     run_cli(world, &["prompt", "show", "binary"]);
@@ -299,24 +334,35 @@ fn catalog_output_empty(world: &mut CatalogWorld) {
     assert!(world.observed().stdout.is_empty());
 }
 
-#[then("JSON workflow catalog содержит alpha и beta по порядку")]
+#[then("JSON workflow catalog равен alpha и beta с absolute paths по порядку")]
 fn workflow_json_sorted(world: &mut CatalogWorld) {
     let value = world.json();
     assert_eq!(value[0]["workflow"], "alpha");
     assert_eq!(value[1]["workflow"], "beta");
     assert!(Path::new(value[0]["path"].as_str().expect("path must be a string")).is_absolute());
+    assert!(Path::new(value[1]["path"].as_str().expect("path must be a string")).is_absolute());
+    assert_eq!(value.as_array().map(Vec::len), Some(2));
 }
 
-#[then("typed Agent catalog содержит alpha и beta по порядку")]
+#[then("workflow catalog text равен строкам alpha и beta")]
+fn workflow_text_sorted(world: &mut CatalogWorld) {
+    assert_eq!(world.stdout(), "alpha\nbeta\n");
+}
+
+#[then("typed Agent catalog равен alpha codex gpt high и beta claude opus high по порядку")]
 fn typed_agents_sorted(world: &mut CatalogWorld) {
     assert_eq!(world.agents.len(), 2);
     assert_eq!(world.agents[0].agent(), "alpha");
     assert_eq!(world.agents[0].agent_type(), "codex");
+    assert_eq!(world.agents[0].model(), "gpt");
+    assert_eq!(world.agents[0].reasoning(), "high");
     assert_eq!(world.agents[1].agent(), "beta");
+    assert_eq!(world.agents[1].agent_type(), "claude");
     assert_eq!(world.agents[1].model(), "opus");
+    assert_eq!(world.agents[1].reasoning(), "high");
 }
 
-#[then("Agent catalog text содержит обе validated записи по порядку")]
+#[then("Agent catalog text равен строкам alpha codex gpt high и beta claude opus high")]
 fn agent_text_sorted(world: &mut CatalogWorld) {
     assert_eq!(
         world.stdout(),
@@ -324,20 +370,52 @@ fn agent_text_sorted(world: &mut CatalogWorld) {
     );
 }
 
-#[then("typed prompt unicode имеет документированный размер bytes")]
+#[then("JSON Agent catalog равен alpha codex gpt high и beta claude opus high по порядку")]
+fn agent_json_sorted(world: &mut CatalogWorld) {
+    let value = world.json();
+    assert_eq!(value[0]["agent"], "alpha");
+    assert_eq!(value[0]["type"], "codex");
+    assert_eq!(value[0]["model"], "gpt");
+    assert_eq!(value[0]["reasoning"], "high");
+    assert_eq!(value[1]["agent"], "beta");
+    assert_eq!(value[1]["type"], "claude");
+    assert_eq!(value[1]["model"], "opus");
+    assert_eq!(value[1]["reasoning"], "high");
+    assert_eq!(value.as_array().map(Vec::len), Some(2));
+}
+
+#[then("typed prompt unicode имеет размер 12 bytes")]
 fn unicode_prompt_bytes(world: &mut CatalogWorld) {
     assert_eq!(world.prompts.len(), 1);
     assert_eq!(world.prompts[0].prompt(), "unicode");
     assert_eq!(world.prompts[0].bytes(), 12);
 }
 
-#[then("JSON prompt catalog содержит alpha и beta по порядку")]
+#[then("JSON prompt catalog равен alpha 10 bytes и beta 4 bytes с absolute paths по порядку")]
 fn prompt_json_sorted(world: &mut CatalogWorld) {
     let value = world.json();
     assert_eq!(value[0]["prompt"], "alpha");
     assert_eq!(value[0]["bytes"], 10);
+    assert!(Path::new(value[0]["path"].as_str().expect("path must be a string")).is_absolute());
     assert_eq!(value[1]["prompt"], "beta");
+    assert_eq!(value[1]["bytes"], 4);
+    assert!(Path::new(value[1]["path"].as_str().expect("path must be a string")).is_absolute());
     assert_eq!(value.as_array().map(Vec::len), Some(2));
+}
+
+#[then("prompt catalog text равен alpha 10 bytes и beta 4 bytes с absolute paths по порядку")]
+fn prompt_text_sorted(world: &mut CatalogWorld) {
+    let lines = world.stdout().lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("prompt alpha: bytes=10 path=/"));
+    assert!(lines[0].ends_with("/prompt/alpha.md"));
+    assert!(lines[1].starts_with("prompt beta: bytes=4 path=/"));
+    assert!(lines[1].ends_with("/prompt/beta.md"));
+}
+
+#[then("JSON catalog равен пустому array")]
+fn empty_json_catalog(world: &mut CatalogWorld) {
+    assert_eq!(world.json().as_array().map(Vec::len), Some(0));
 }
 
 #[then("typed source workflow содержит исходные Steps и references")]
@@ -383,7 +461,7 @@ fn workflow_show_text(world: &mut CatalogWorld) {
     assert_eq!(lines.len(), 3);
 }
 
-#[then("typed Agent show содержит alpha")]
+#[then("typed Agent show равен alpha codex gpt high")]
 fn typed_agent_show(world: &mut CatalogWorld) {
     let agent = world.shown_agent.as_ref().expect("agent show must succeed");
     assert_eq!(agent.agent(), "alpha");
@@ -392,7 +470,7 @@ fn typed_agent_show(world: &mut CatalogWorld) {
     assert_eq!(agent.reasoning(), "high");
 }
 
-#[then("JSON Agent show содержит beta")]
+#[then("JSON Agent show равен beta claude opus high")]
 fn agent_show_json(world: &mut CatalogWorld) {
     let value = world.json();
     assert_eq!(value["agent"], "beta");
@@ -401,7 +479,7 @@ fn agent_show_json(world: &mut CatalogWorld) {
     assert_eq!(value["reasoning"], "high");
 }
 
-#[then("Agent show text содержит выбранную запись")]
+#[then("Agent show text равен строке agent alpha: type=codex model=gpt reasoning=high")]
 fn agent_show_text(world: &mut CatalogWorld) {
     assert_eq!(
         world.stdout(),
@@ -511,6 +589,8 @@ fn environment(root: &Path) -> ProcessEnvironment {
     ProcessEnvironment {
         home: None,
         orc_home: Some(root.as_os_str().to_owned()),
+        current_dir: None,
+        path: None,
     }
 }
 

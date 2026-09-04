@@ -1,5 +1,8 @@
 //! Граница Agent type проверяет Agent, запускает его и распознаёт возврат; lifecycle не знает CLI или протокол конкретного type.
 
+mod claude;
+mod codex;
+
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -11,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Управляемые recovery-critical события активной обработки attempt.
 pub trait AttemptControl: Send {
@@ -394,108 +397,11 @@ trait ProcessAgentType: Sync {
     fn parse_line(&self, line: &str) -> Result<Option<AgentProtocolEvent>, String>;
 }
 
-#[derive(Debug)]
-struct CodexAgentType;
-
-#[derive(Debug)]
-struct ClaudeAgentType;
-
-static CODEX_AGENT_TYPE: CodexAgentType = CodexAgentType;
-static CLAUDE_AGENT_TYPE: ClaudeAgentType = ClaudeAgentType;
-
 fn process_agent_type(type_id: &str) -> Result<&'static dyn ProcessAgentType, String> {
     match type_id {
-        "codex" => Ok(&CODEX_AGENT_TYPE),
-        "claude" => Ok(&CLAUDE_AGENT_TYPE),
+        "codex" => Ok(codex::agent_type()),
+        "claude" => Ok(claude::agent_type()),
         _ => Err(format!("неизвестный Agent type '{type_id}'")),
-    }
-}
-
-impl ProcessAgentType for CodexAgentType {
-    fn executable(&self) -> &'static str {
-        "codex"
-    }
-
-    fn configure(&self, command: &mut Command, request: &AgentRunRequest<'_>) {
-        let reasoning = format!("model_reasoning_effort=\"{}\"", request.reasoning);
-        if request.human {
-            if let Some(session_id) = request.resume_session {
-                command.arg("resume");
-                command.args(["--model", request.model, "--config", &reasoning]);
-                command.args([session_id, request.prompt]);
-            } else {
-                command.args(["--model", request.model, "--config", &reasoning]);
-                command.arg(request.prompt);
-            }
-        } else {
-            command.arg("exec");
-            if request.resume_session.is_some() {
-                command.arg("resume");
-            }
-            command.args(["--json", "--model", request.model, "--config", &reasoning]);
-            if let Some(session_id) = request.resume_session {
-                command.arg(session_id);
-            }
-            command.arg(request.prompt);
-        }
-    }
-
-    fn parse_line(&self, line: &str) -> Result<Option<AgentProtocolEvent>, String> {
-        let event: CodexEvent = serde_json::from_str(line)
-            .map_err(|error| format!("codex protocol содержит невалидный JSON: {error}"))?;
-        Ok(match event {
-            CodexEvent::ThreadStarted { thread_id } => {
-                Some(AgentProtocolEvent::SessionStarted(thread_id))
-            }
-            CodexEvent::ItemCompleted {
-                item: CodexItem::AgentMessage { text },
-            } => Some(AgentProtocolEvent::Message(text)),
-            CodexEvent::ItemCompleted {
-                item: CodexItem::Other,
-            }
-            | CodexEvent::Other => None,
-        })
-    }
-}
-
-impl ProcessAgentType for ClaudeAgentType {
-    fn executable(&self) -> &'static str {
-        "claude"
-    }
-
-    fn configure(&self, command: &mut Command, request: &AgentRunRequest<'_>) {
-        if !request.human {
-            command.args(["--print", "--output-format", "stream-json", "--verbose"]);
-        }
-        command.args(["--model", request.model, "--effort", request.reasoning]);
-        if let Some(session_id) = request.resume_session {
-            command.args(["--resume", session_id]);
-        }
-        command.arg(request.prompt);
-    }
-
-    fn parse_line(&self, line: &str) -> Result<Option<AgentProtocolEvent>, String> {
-        let event: ClaudeEvent = serde_json::from_str(line)
-            .map_err(|error| format!("claude protocol содержит невалидный JSON: {error}"))?;
-        Ok(match event {
-            ClaudeEvent::System {
-                subtype: ClaudeSystemSubtype::Init,
-                session_id: Some(session_id),
-            } => Some(AgentProtocolEvent::SessionStarted(session_id)),
-            ClaudeEvent::Assistant { message } => {
-                let text = message
-                    .content
-                    .into_iter()
-                    .filter_map(|block| match block {
-                        ClaudeContent::Text { text } => Some(text),
-                        ClaudeContent::Other => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                (!text.is_empty()).then_some(AgentProtocolEvent::Message(text))
-            }
-            ClaudeEvent::System { .. } | ClaudeEvent::Other => None,
-        })
     }
 }
 
@@ -613,63 +519,6 @@ pub(crate) fn wait_for_child(
         }
         thread::park_timeout(Duration::from_millis(10));
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum CodexEvent {
-    #[serde(rename = "thread.started")]
-    ThreadStarted { thread_id: String },
-    #[serde(rename = "item.completed")]
-    ItemCompleted { item: CodexItem },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum CodexItem {
-    #[serde(rename = "agent_message")]
-    AgentMessage { text: String },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum ClaudeEvent {
-    #[serde(rename = "system")]
-    System {
-        subtype: ClaudeSystemSubtype,
-        #[serde(default)]
-        session_id: Option<String>,
-    },
-    #[serde(rename = "assistant")]
-    Assistant { message: ClaudeMessage },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ClaudeSystemSubtype {
-    Init,
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeMessage {
-    content: Vec<ClaudeContent>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum ClaudeContent {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(other)]
-    Other,
 }
 
 fn signal_process_group(process_id: u32, signal: &str) -> Result<(), String> {

@@ -1,6 +1,6 @@
 Feature: Read-only inspection durable runs
 
-  @format:корень-состояния-и-layout @format:agent-attempt-record @format:artifact @cli:read-only-run-inspection
+  @format:корень-состояния-и-layout @format:artifact @cli:read-only-run-inspection
   Rule: Run inspection читает согласованный snapshot
 
     Read-only inspection загружает materialized workflow, attempts и artifacts через ту же validation boundary, что resume.
@@ -67,7 +67,7 @@ Feature: Read-only inspection durable runs
         | format      |
         | workflow-id |
 
-  @format:agent-attempt-record @cli:read-only-run-inspection
+  @cli:read-only-run-inspection
   Rule: Run show отображает validated read model
 
     Последняя session и status attempts и run вычисляются из полной durable-модели и отдельно не сохраняются.

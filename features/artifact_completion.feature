@@ -1,7 +1,7 @@
 Feature: Публикация Agent completion и artifacts
   Artifact — версионируемый результат с durable-ключом `(attempt-n, step-id, input-id)`; source-файлы остаются во владении Agent, а workflow видит только полный неизменяемый набор последнего принятого completion после возврата Agent.
 
-  @cli:session-activate-и-attempt-complete @format:artifact @format:agent-attempt-record
+  @cli:session-activate-и-attempt-complete @format:artifact
   Rule: Attempt complete принимает полный snapshot объявленных outputs
     Каждый вызов передаёт по одному absolute path на доступный regular file для каждого output либо пустой набор для Step без outputs; source может находиться вне run и быть symbolic link, а parent синхронно копирует его bytes в volatile-кандидат без переноса source-файла.
 
@@ -36,9 +36,10 @@ Feature: Публикация Agent completion и artifacts
         | с отсутствующим path |
         | с path на directory |
 
-  @cli:session-activate-и-attempt-complete @cli:вывод-команд @format:artifact @format:agent-attempt-record
+  @cli:session-activate-и-attempt-complete @cli:вывод-команд @format:artifact
   Rule: Completion становится durable только после возврата Agent
     После возврата Agent последний принятый completion-кандидат финализируется независимо от exit code; без кандидата terminal event не добавляется, и attempt доступен только последующему явному resume.
+    Финализация добавляет последним ровно один закрытый event `type: completed`; record сохраняет исходный `input` и предшествующие session activations в их durable-порядке.
     Принятый completion-кандидат работающего Agent не завершает source attempt и не изменяет frontier до фиксации возврата процесса.
 
     Scenario: Single-step run публикует artifact и завершается
@@ -75,7 +76,7 @@ Feature: Публикация Agent completion и artifacts
       And Agent не запускается повторно
       And lifecycle сообщает already completed
 
-  @cli:session-activate-и-attempt-complete @format:agent-attempt-record @format:artifact
+  @cli:session-activate-и-attempt-complete @format:artifact
   Rule: Completion-кандидат не закрывает активную обработку attempt
     Пока Agent process не вернул управление, каждый валидный attempt complete целиком заменяет предыдущий кандидат, а session activations продолжают приниматься; parent финализирует последний кандидат только после обработки более ранних control calls.
 
@@ -85,8 +86,9 @@ Feature: Публикация Agent completion и artifacts
       Then lifecycle завершается с кодом 0
       And durable artifact result содержит bytes final
       And durable attempt содержит late-session перед completed
+      And completed attempt record содержит только input и ordered events
 
-  @process @cli:resume @cli:session-activate-и-attempt-complete @format:artifact @format:agent-attempt-record
+  @process @cli:resume @cli:session-activate-и-attempt-complete @format:artifact
   Rule: Crash до commit отбрасывает volatile completion-кандидат
     Принятый completion не восстанавливается, пока Agent не вернул управление и completed не опубликован; следующий resume продолжает тот же attempt и может передать новый полный кандидат, а crash-leftovers без completed не входят в durable-модель.
 

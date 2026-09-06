@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Barrier, Mutex};
@@ -1180,6 +1180,9 @@ fn completed_linear_durable_run(world: &mut LifecycleWorld) {
 #[allow(clippy::needless_pass_by_value)]
 fn corrupt_durable_model(world: &mut LifecycleWorld, corruption: String) {
     let directory = run_directory(world);
+    if corrupt_attempt_record(&directory, &corruption) {
+        return;
+    }
     match corruption.as_str() {
         "отсутствующий spec" => {
             fs::remove_file(directory.join("spec.yaml")).expect("spec must be removed");
@@ -1187,10 +1190,6 @@ fn corrupt_durable_model(world: &mut LifecycleWorld, corruption: String) {
         "невалидный spec YAML" => {
             fs::write(directory.join("spec.yaml"), b"steps: [")
                 .expect("invalid spec must be written");
-        }
-        "невалидный attempt record" => {
-            fs::write(directory.join("1.target.attempt.yaml"), b"events: [")
-                .expect("invalid attempt must be written");
         }
         "отсутствующий completed artifact" => {
             fs::remove_file(directory.join("0.source.result.artifact"))
@@ -1241,6 +1240,66 @@ fn corrupt_durable_model(world: &mut LifecycleWorld, corruption: String) {
         }
         other => panic!("unknown durable corruption {other}"),
     }
+}
+
+fn corrupt_attempt_record(directory: &Path, corruption: &str) -> bool {
+    let record = match corruption {
+        "невалидный attempt record" => Some("events: ["),
+        "attempt record без input" => Some("events: []\n"),
+        "attempt record с неизвестным полем" => {
+            Some("input: [0]\nevents: []\nstatus: running\n")
+        }
+        "attempt record с duplicate root key" => Some("input: [0]\ninput: [0]\nevents: []\n"),
+        "input не sequence" => Some("input: 0\nevents: []\n"),
+        "events не sequence" => Some("input: [0]\nevents: completed\n"),
+        "неизвестный event type" => Some("input: [0]\nevents:\n- type: paused\n"),
+        "session event без session-id" => {
+            Some("input: [0]\nevents:\n- type: session-activated\n")
+        }
+        "completion event с лишним полем" => {
+            Some("input: [0]\nevents:\n- type: completed\n  status: done\n")
+        }
+        "соседний повтор session activation" => Some(
+            "input: [0]\nevents:\n- type: session-activated\n  session-id: same\n- type: session-activated\n  session-id: same\n",
+        ),
+        "completed не является последним" => Some(
+            "input: [0]\nevents:\n- type: completed\n- type: session-activated\n  session-id: later\n",
+        ),
+        "completed повторяется" => {
+            Some("input: [0]\nevents:\n- type: completed\n- type: completed\n")
+        }
+        "initial attempt с непустым input" => {
+            fs::write(
+                directory.join("0.source.attempt.yaml"),
+                "input: [0]\nevents:\n- type: completed\n",
+            )
+            .expect("contradictory initial attempt must be written");
+            return true;
+        }
+        _ => None,
+    };
+    if let Some(record) = record {
+        fs::write(directory.join("1.target.attempt.yaml"), record)
+            .expect("invalid attempt record must be written");
+        return true;
+    }
+    let invalid_name = match corruption {
+        "невалидное имя attempt record" => Some("invalid.attempt.yaml"),
+        "нечисловой номер attempt" => Some("x.target.attempt.yaml"),
+        "attempt с неизвестным Step в имени" => Some("9.missing.attempt.yaml"),
+        _ => None,
+    };
+    if let Some(name) = invalid_name {
+        fs::write(directory.join(name), "input: []\nevents: []\n")
+            .expect("invalid named attempt must be written");
+        return true;
+    }
+    if corruption == "attempt record не regular file" {
+        fs::create_dir(directory.join("9.target.attempt.yaml"))
+            .expect("attempt directory must be created");
+        return true;
+    }
+    false
 }
 
 #[given("подготовлен незавершённый durable run с crash leftovers")]
@@ -2610,6 +2669,19 @@ fn durable_spec_has_closed_agent_schema(world: &mut LifecycleWorld) {
     assert_eq!(actual, expected);
 }
 
+#[then("initial attempt record содержит только пустые input и events")]
+fn initial_attempt_has_exact_pending_schema(world: &mut LifecycleWorld) {
+    assert_eq!(attempt_record_names(world), ["0.first.attempt.yaml"]);
+    let actual: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(run_directory(world).join("0.first.attempt.yaml"))
+            .expect("initial attempt must be readable"),
+    )
+    .expect("initial attempt must be YAML");
+    let expected: serde_yaml::Value =
+        serde_yaml::from_str("input: []\nevents: []\n").expect("expected attempt must be YAML");
+    assert_eq!(actual, expected);
+}
+
 #[then("resume использует сохранённые Agent, prompt и topology, а spec неизменен")]
 fn resume_uses_materialized_source_snapshot(world: &mut LifecycleWorld) {
     assert_eq!(world.calls.len(), 1);
@@ -2891,6 +2963,20 @@ fn durable_attempt_contains_late_session_before_completion(world: &mut Lifecycle
     assert!(session < completed);
 }
 
+#[then("completed attempt record содержит только input и ordered events")]
+fn completed_attempt_has_exact_ordered_events(world: &mut LifecycleWorld) {
+    let actual: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(run_directory(world).join("0.first.attempt.yaml"))
+            .expect("completed attempt must be readable"),
+    )
+    .expect("completed attempt must be YAML");
+    let expected: serde_yaml::Value = serde_yaml::from_str(
+        "input: []\nevents:\n- type: session-activated\n  session-id: late-session\n- type: completed\n",
+    )
+    .expect("expected completed attempt must be YAML");
+    assert_eq!(actual, expected);
+}
+
 #[then("durable artifact result содержит bytes good")]
 fn artifact_has_good_bytes(world: &mut LifecycleWorld) {
     assert_eq!(
@@ -2981,9 +3067,14 @@ fn diamond_attempt_order(world: &mut LifecycleWorld) {
 
 #[then("join attempt имеет input 1, 2")]
 fn join_input_versions(world: &mut LifecycleWorld) {
-    let record = fs::read_to_string(run_directory(world).join("3.join.attempt.yaml"))
-        .expect("join attempt must be readable");
-    assert!(record.contains("input:\n- 1\n- 2"));
+    let record: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(run_directory(world).join("3.join.attempt.yaml"))
+            .expect("join attempt must be readable"),
+    )
+    .expect("join attempt must be YAML");
+    assert_eq!(record["input"][0].as_u64(), Some(1));
+    assert_eq!(record["input"][1].as_u64(), Some(2));
+    assert_eq!(record["input"].as_sequence().map(Vec::len), Some(2));
 }
 
 #[then("join Agent получает inputs left:shared и right:shared")]

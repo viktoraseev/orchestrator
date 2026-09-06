@@ -1,7 +1,7 @@
 Feature: Control endpoint активных Agent attempts
   Дочерние control-команды передают события единственному supervisor текущего run и никогда не изменяют durable-файлы напрямую.
 
-  @process @cli:session-activate-и-attempt-complete @cli:корень-состояния-и-переменные-окружения @format:agent-attempt-record @format:artifact
+  @process @cli:session-activate-и-attempt-complete @cli:корень-состояния-и-переменные-окружения @format:artifact
   Rule: Parent принимает control call только для активного inherited context
     Перед каждым Agent process supervisor передаёт endpoint, RunId и attempt через environment; parent принимает запрос только для обслуживаемого run и активного attempt, а недоступный, чужой или закрытый context возвращает код 5 без изменения durable run.
 
@@ -35,7 +35,7 @@ Feature: Control endpoint активных Agent attempts
       And закрытый control endpoint удалён
       And Agent не запускался и durable run не изменился
 
-  @process @cli:сигналы-и-закрытие-терминала @format:agent-attempt-record
+  @process @cli:сигналы-и-закрытие-терминала
   Rule: Один supervisor использует один защищённый volatile endpoint
     Все одновременные Agent attempts run используют один Unix socket с правами 600; fail-fast одного process закрывает его control context и завершает соседние process groups, а после штатного выхода endpoint удаляется и после crash следующий supervisor удаляет stale path и создаёт новый непереиспользуемый endpoint.
 

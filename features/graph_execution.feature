@@ -1,10 +1,10 @@
 Feature: Выполнение workflow graph
   Attempt — одна обработка Step activation выбранным Agent или Process executor; его первая durable-публикация фиксирует input mapping, а durable facts определяют frontier и глобальную нумерацию attempts.
 
-  @format:agent-attempt-record
   Rule: Линейный target получает зафиксированную версию source artifacts
     Scheduling создаёт attempt только для ready activation и первой durable-публикацией навсегда фиксирует выбранные source attempts; Agent получает UTF-8 prompt и input mapping с artifact-ключами `(source-step-id, input-id)`.
-    Input mapping принадлежит target attempt, содержит по одному выбранному source attempt для каждого dependency и передаёт все outputs успешно завершённого source attempt как `(source-step-id, input-id) → artifact path`; отдельной сущности Input нет, а одинаковые InputId разных source Steps различаются по StepId.
+    Attempt record получает номер и StepId только из имени `<attempt-n>.<step-id>.attempt.yaml`, а из workflow — executor, prompt, dependencies и outputs; сам record хранит только sequence номеров выбранных source attempts в `input` и ordered `events`.
+    Input mapping принадлежит target attempt, содержит по одному выбранному source attempt для каждого dependency в порядке `depends-on` и передаёт все outputs успешно завершённого source attempt как `(source-step-id, input-id) → artifact path`; отдельной сущности Input нет, а одинаковые InputId разных source Steps различаются по StepId.
     Durable artifact имеет ключ `(attempt-n, step-id, input-id)`, все его версии сохраняются для истории, а поздние versions не меняют input mapping, prompt или argv уже созданного attempt.
     При создании и восстановлении attempt input содержит ровно один существующий успешно завершённый source attempt для каждого Step в порядке `depends-on`; source number меньше target number, свежее нижней границы предыдущей activation и имеет artifact для каждого объявленного output.
     Неполная, старая или противоречивая input group отклоняется fail-fast, а опубликованные source numbers остаются неизменяемыми.

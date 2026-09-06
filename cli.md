@@ -1,6 +1,6 @@
 # CLI-контракт orchestrator
 
-Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель run, attempts, artifacts и workflow graph, включая cycles, planning и validation, определена в `features/*.feature`, а layout состояния и форматы файлов — в `format.spec.md`.
+Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель run, attempts, artifacts и workflow graph, включая cycles, planning и validation, определена в `features/*.feature`, а durable layout и формат artifact — в `format.spec.md`.
 
 ## Команды и аргументы
 

@@ -93,7 +93,7 @@ Feature: Исполнение произвольных процессов в wor
         | path placeholder {{path:source:missing}} без output      |
         | output placeholder {{output:missing}} неизвестен         |
 
-  @cli:resume @cli:коды-завершения @format:agent-attempt-record
+  @cli:resume @cli:коды-завершения
   Rule: Незавершённый Process attempt повторяется at-least-once
     Process не имеет native session и не создаёт session activation; явный resume повторно запускает тот же unfinished attempt с materialized executable, cwd, parameters и аргументами из durable input mapping, поэтому внешние side effects обязаны быть идемпотентными.
     Ненулевой exit code Process является runtime failure, не сохраняется в attempt record, не публикует staging outputs, не добавляет terminal event и не запускает новые attempts или автоматический restart; код процесса не становится exit code orchestrator.

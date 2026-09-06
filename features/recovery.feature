@@ -1,10 +1,12 @@
 Feature: Восстановление durable run
   Resume после получения Run lock проверяет все опубликованные attempts, выводит их состояние без отдельной state-записи или обязательного output-маркера и только затем продолжает unfinished attempts либо создаёт ready activations; crash leftovers остаются вне модели.
 
-  @format:agent-attempt-record @format:artifact @cli:resume
+  @format:artifact @cli:resume
   Rule: Противоречивая durable-модель отклоняется до побочных эффектов
     После получения Run lock и до запуска executor, вычисления frontier или durable publication resume полностью проверяет materialized workflow, все attempt records и artifacts завершённых attempts на соответствие format и workflow graph; любая ошибка завершает команду без запуска Agent и изменения durable-модели.
-    После успешной проверки состояние attempt вычисляется из validated materialized workflow, полного attempt record и artifacts; отдельный durable status не сохраняется.
+    Attempt record является regular YAML file с именем `<n>.<step-id>.attempt.yaml` и закрытым root mapping из обязательных sequences `input` и `events`; имя связывает record с глобальным номером и существующим Step, duplicate keys, неизвестные поля и нарушения типов запрещены.
+    Каждый event является закрытым mapping: session activation содержит только `type: session-activated` и строковый `session-id`, completion — только `type: completed`; соседние session activations не повторяют ID, completed встречается не более одного раза и только последним.
+    После успешной проверки состояния running, paused и completed вычисляются из validated workflow, record и artifacts и отдельными полями не сохраняются.
 
     Scenario Outline: Ошибка любого связанного durable-факта возвращает код 3
       Given подготовлен завершённый линейный durable run
@@ -18,6 +20,22 @@ Feature: Восстановление durable run
         | отсутствующий spec                 |
         | невалидный spec YAML               |
         | невалидный attempt record          |
+        | attempt record без input           |
+        | attempt record с неизвестным полем |
+        | attempt record с duplicate root key |
+        | input не sequence                  |
+        | events не sequence                 |
+        | неизвестный event type             |
+        | session event без session-id       |
+        | completion event с лишним полем    |
+        | соседний повтор session activation |
+        | completed не является последним    |
+        | completed повторяется              |
+        | невалидное имя attempt record      |
+        | нечисловой номер attempt           |
+        | attempt с неизвестным Step в имени |
+        | attempt record не regular file     |
+        | initial attempt с непустым input   |
         | отсутствующий completed artifact   |
         | дополнительный completed artifact  |
         | неполная input group               |
@@ -40,7 +58,7 @@ Feature: Восстановление durable run
       Then lifecycle завершается с кодом 3
       And Agent не запускался и повреждённый durable run не изменился
 
-  @format:agent-attempt-record @format:artifact @cli:resume
+  @format:artifact @cli:resume
   Rule: Номера attempts глобальны и не переиспользуются
     Attempt существует только после атомарной публикации record; первый attempt получает номер 0, а каждый следующий — номер больше любого опубликованного или зарезервированного crash-остатком номера во всём run, поэтому пропуски не заполняются.
 

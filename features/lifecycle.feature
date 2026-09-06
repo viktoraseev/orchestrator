@@ -1,11 +1,12 @@
 Feature: Durable lifecycle run
   Run — один сохраняемый запуск materialized workflow; attempts и artifacts образуют его durable-модель, а текущая позиция и состояние вычисляются из неё. Lifecycle создаёт и продолжает run только через подтверждённую durable-модель.
 
-  @cli:start @format:agent-attempt-record
+  @cli:start
   Rule: Start обещает только durable run
     После общего preflight start резервирует и блокирует run, durable-публикует проверенный materialized workflow до initial attempt и запускает Agent только после обеих публикаций; возврат Agent process без принятого completion оставляет attempt незавершённым и завершает команду runtime failure без автоматического повторного запуска или native resume в этой lifecycle-команде.
     До резервирования RunId source workflow, prompts и Agents materialize’ятся только в памяти; `spec.yaml` содержит ровно `workflow-id`, effective `max-parallel-agents`, mapping всех run parameters и Steps в source order, а каждый Agent Step — ровно `id`, materialized `agent`, точный `prompt` либо null, `human`, `process: null`, `depends-on` и `outputs`.
     Durable snapshot не содержит AgentId, PromptId или ссылок на изменяемые config, workflow и prompt files, публикуется атомарно под фиксированным именем после получения Run lock и остаётся неизменным при resume.
+    Initial attempt имеет глобальный номер 0 и имя `0.<first-step-id>.attempt.yaml`; его закрытый YAML mapping содержит только пустые sequences `input` и `events`, не materialize'ит данные workflow и не хранит производные статусы.
 
     Scenario: Agent возвращает управление без completion
       Given подготовлен single-step workflow без outputs
@@ -13,6 +14,7 @@ Feature: Durable lifecycle run
       Then lifecycle завершается с кодом 1
       And до вызова Agent опубликованы spec и initial attempt 0
       And durable spec содержит закрытую Agent Step schema без source references
+      And initial attempt record содержит только пустые input и events
       And RunId является десятичным Unix timestamp создания в миллисекундах
       And initial attempt остаётся незавершённым
       And Agent запускался ровно один раз
@@ -61,9 +63,10 @@ Feature: Durable lifecycle run
       Then lifecycle завершается с кодом 4
       And каталог неизвестного run не создан
 
-  @cli:resume @format:agent-attempt-record
+  @cli:resume
   Rule: Session activation сохраняется в durable-порядке
     Явный resume продолжает тот же attempt с последней Agent session activation в durable-порядке независимо от create, resume или fork; без activation Agent type создаёт новую внутреннюю session для того же attempt и номера.
+    Session activation записывается mapping с ровно `type: session-activated` и строковым `session-id`; последовательность `events` хранит durable-порядок, а повтор последнего ID является успешным no-op и не добавляет событие.
 
     Scenario: Resume без activation продолжает тот же attempt с новой session
       Given подготовлен незавершённый run без session activations

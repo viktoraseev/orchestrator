@@ -16,7 +16,7 @@ pub(crate) enum AttemptEvent {
         #[serde(rename = "session-id")]
         session_id: String,
     },
-    Completed,
+    Completed {},
 }
 
 impl AttemptRecord {
@@ -37,17 +37,17 @@ impl AttemptRecord {
     }
 
     pub(crate) fn complete(&mut self) {
-        self.events.push(AttemptEvent::Completed);
+        self.events.push(AttemptEvent::Completed {});
     }
 
     pub(crate) fn is_completed(&self) -> bool {
-        matches!(self.events.last(), Some(AttemptEvent::Completed))
+        matches!(self.events.last(), Some(AttemptEvent::Completed {}))
     }
 
     pub(crate) fn last_session(&self) -> Option<&str> {
         self.events.iter().rev().find_map(|event| match event {
             AttemptEvent::SessionActivated { session_id } => Some(session_id.as_str()),
-            AttemptEvent::Completed => None,
+            AttemptEvent::Completed {} => None,
         })
     }
 
@@ -61,10 +61,10 @@ impl AttemptRecord {
                     }
                     last_session = Some(session_id.as_str());
                 }
-                AttemptEvent::Completed if index + 1 != self.events.len() => {
+                AttemptEvent::Completed {} if index + 1 != self.events.len() => {
                     return Err("completed не является последним событием");
                 }
-                AttemptEvent::Completed => {}
+                AttemptEvent::Completed {} => {}
             }
         }
         Ok(())

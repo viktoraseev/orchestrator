@@ -1,8 +1,12 @@
 //! Cucumber-проверка read-only run inspection API и его CLI-представления.
 
 use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use cucumber::{World, given, then, when};
 use fs2::FileExt;
@@ -18,6 +22,7 @@ struct InspectionWorld {
     durable_snapshot: Vec<(PathBuf, Vec<u8>)>,
     lock: Option<File>,
     typed_snapshot: Option<RunInspection>,
+    watch_quiet_before_completion: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -25,6 +30,39 @@ struct Observed {
     exit_code: u8,
     stdout: Vec<u8>,
     stderr: String,
+}
+
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("child must be running")
+    }
+
+    fn id(&self) -> u32 {
+        self.0.as_ref().expect("child must be running").id()
+    }
+
+    fn wait_with_output(&mut self) -> std::process::Output {
+        self.0
+            .take()
+            .expect("child must be running")
+            .wait_with_output()
+            .expect("orchestrator must exit")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[given("подготовлен пустой inspection root")]
@@ -253,9 +291,66 @@ fn watch_json_through_cli(world: &mut InspectionWorld, run_id: String) {
     run_cli(world, ["run", "watch", &run_id, "--format", "json"]);
 }
 
+#[when("watch наблюдает изменения lock и временного entry до durable completion")]
+fn watch_volatile_entries_then_completion(world: &mut InspectionWorld) {
+    world.capture_snapshot();
+    let directory = run_directory(world.root(), 10);
+    let mut process = spawn_json_watch(world.root(), 10);
+    let (lines, reader) = read_child_lines(&mut process);
+    let mut snapshots = vec![recv_watch_line(&lines)];
+
+    fs::write(directory.join("active.lock"), b"volatile").expect("lock must be changed");
+    fs::write(directory.join(".inspection.tmp"), b"volatile")
+        .expect("temporary entry must be changed");
+    match lines.recv_timeout(Duration::from_millis(350)) {
+        Err(RecvTimeoutError::Timeout) => world.watch_quiet_before_completion = Some(true),
+        Ok(snapshot) => {
+            world.watch_quiet_before_completion = Some(false);
+            snapshots.push(snapshot);
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("watch stdout must remain connected before completion")
+        }
+    }
+
+    fs::write(
+        directory.join("0.first.attempt.yaml"),
+        b"input: []\nevents:\n- type: completed\n",
+    )
+    .expect("completion must be published");
+    let output = process.wait_with_output();
+    reader.join().expect("watch stdout reader must finish");
+    snapshots.extend(lines.try_iter());
+    world.observed = Some(observe_watch_output(&output, &snapshots));
+}
+
+#[when("active watch получает SIGTERM после initial snapshot")]
+fn active_watch_receives_sigterm(world: &mut InspectionWorld) {
+    world.capture_snapshot();
+    let mut process = spawn_json_watch(world.root(), 10);
+    let (lines, reader) = read_child_lines(&mut process);
+    let initial = recv_watch_line(&lines);
+    let status = Command::new("/bin/kill")
+        .args(["-TERM", &process.id().to_string()])
+        .status()
+        .expect("SIGTERM must be sent");
+    assert!(status.success());
+
+    let output = process.wait_with_output();
+    reader.join().expect("watch stdout reader must finish");
+    let mut snapshots = vec![initial];
+    snapshots.extend(lines.try_iter());
+    world.observed = Some(observe_watch_output(&output, &snapshots));
+}
+
 #[when("запускается orchestrator run verify в JSON")]
 fn verify_json_through_cli(world: &mut InspectionWorld) {
     run_cli(world, ["run", "verify", "--format", "json"]);
+}
+
+#[when("запускается orchestrator run verify 10 в JSON")]
+fn verify_selected_run_json_through_cli(world: &mut InspectionWorld) {
+    run_cli(world, ["run", "verify", "10", "--format", "json"]);
 }
 
 #[when(expr = "запускается orchestrator run artifact {word} {word} {word}")]
@@ -342,6 +437,11 @@ fn typed_snapshot_has_two_versions(world: &mut InspectionWorld) {
     assert_eq!(snapshot.artifacts()[1].attempt(), 2);
 }
 
+#[then("typed inspection snapshot отсутствует")]
+fn typed_snapshot_is_absent(world: &mut InspectionWorld) {
+    assert!(world.typed_snapshot.is_none());
+}
+
 #[then(expr = "JSON show содержит snake_case typed snapshot run {int} с number, null и arrays")]
 fn json_show_has_typed_snapshot(world: &mut InspectionWorld, run_id: u64) {
     let value: serde_json::Value =
@@ -373,6 +473,35 @@ fn watch_published_one_json_snapshot(world: &mut InspectionWorld) {
     assert_eq!(value["state"], "completed");
 }
 
+#[then("watch опубликовал initial active и final completed snapshots")]
+fn watch_published_active_and_completed_snapshots(world: &mut InspectionWorld) {
+    let lines = world.stdout_text().lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    let initial: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("initial watch line must be JSON");
+    let completed: serde_json::Value =
+        serde_json::from_str(lines[1]).expect("completed watch line must be JSON");
+    assert_eq!(initial["run_id"], 10);
+    assert_eq!(initial["state"], "active");
+    assert_eq!(completed["run_id"], 10);
+    assert_eq!(completed["state"], "completed");
+}
+
+#[then("watch не публиковал snapshot для volatile изменений за три polling interval")]
+fn watch_ignored_volatile_changes(world: &mut InspectionWorld) {
+    assert_eq!(world.watch_quiet_before_completion, Some(true));
+}
+
+#[then("watch опубликовал только initial active snapshot")]
+fn watch_published_only_initial_active_snapshot(world: &mut InspectionWorld) {
+    let lines = world.stdout_text().lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    let initial: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("initial watch line must be JSON");
+    assert_eq!(initial["run_id"], 10);
+    assert_eq!(initial["state"], "active");
+}
+
 #[then("verify JSON report содержит все три runs по RunId и diagnostics каждого invalid run")]
 fn verify_report_contains_all_runs(world: &mut InspectionWorld) {
     let value: serde_json::Value =
@@ -397,6 +526,19 @@ fn verify_report_contains_all_runs(world: &mut InspectionWorld) {
         value["runs"][2]["diagnostics"]
             .as_array()
             .is_some_and(|diagnostics| !diagnostics.is_empty())
+    );
+}
+
+#[then("verify JSON report содержит только valid run 10")]
+fn verify_report_contains_only_selected_run(world: &mut InspectionWorld) {
+    let value: serde_json::Value =
+        serde_json::from_slice(&world.observed().stdout).expect("verify stdout must be JSON");
+    assert_eq!(value["runs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(value["runs"][0]["run_id"], 10);
+    assert_eq!(value["runs"][0]["valid"], true);
+    assert_eq!(
+        value["runs"][0]["diagnostics"].as_array().map(Vec::len),
+        Some(0)
     );
 }
 
@@ -439,6 +581,57 @@ fn run_cli<const N: usize>(world: &mut InspectionWorld, arguments: [&str; N]) {
         stdout: output.stdout,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     });
+}
+
+fn spawn_json_watch(root: &Path, run_id: u64) -> ChildGuard {
+    ChildGuard::new(
+        Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+            .args(["run", "watch", &run_id.to_string(), "--format", "json"])
+            .env("ORC_HOME", root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("orchestrator watch must start"),
+    )
+}
+
+fn read_child_lines(process: &mut ChildGuard) -> (Receiver<String>, JoinHandle<()>) {
+    let stdout = process
+        .child_mut()
+        .stdout
+        .take()
+        .expect("watch stdout must be piped");
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    (receiver, reader)
+}
+
+fn recv_watch_line(lines: &Receiver<String>) -> String {
+    lines
+        .recv_timeout(Duration::from_secs(2))
+        .expect("watch must publish snapshot before deadline")
+}
+
+fn observe_watch_output(output: &std::process::Output, snapshots: &[String]) -> Observed {
+    let mut stdout = snapshots.join("\n").into_bytes();
+    if !stdout.is_empty() {
+        stdout.push(b'\n');
+    }
+    Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        stdout,
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
 }
 
 fn observe_api(result: Result<String, orchestrator::CommandError>) -> Observed {
@@ -494,7 +687,7 @@ fn write_ready_run(root: &Path, run_id: u64) {
         spec,
         &[(
             "0.first.attempt.yaml",
-            "input: []\nevents:\n- type: session-activated\n  session-id: native-session\n- type: completed\n",
+            "input: []\nevents:\n- type: session-activated\n  session-id: previous-session\n- type: session-activated\n  session-id: native-session\n- type: completed\n",
         )],
     );
 }

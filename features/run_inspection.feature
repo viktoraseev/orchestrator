@@ -1,6 +1,19 @@
 Feature: Read-only inspection durable runs
 
-  @spec:read-only-inspection @format:корень-состояния-и-layout @cli:read-only-run-inspection
+  @format:корень-состояния-и-layout @format:materialized-workflow @format:agent-attempt-record @format:artifact @cli:read-only-run-inspection
+  Rule: Run inspection читает согласованный snapshot
+
+    Read-only inspection загружает materialized workflow, attempts и artifacts через ту же validation boundary, что resume.
+    Fingerprint включает durable spec.yaml, attempt records и artifacts, исключает active.lock и временные entries, повторяет изменившийся snapshot не более четырёх раз и различает стабильную validation error и непрерывные изменения с runtime error.
+
+    Scenario: Стабильная противоречивая модель не становится typed snapshot
+      Given подготовлены completed и противоречивый durable runs
+      When строится typed inspection snapshot run 20 через публичный API
+      Then inspection завершается с кодом 3
+      And typed inspection snapshot отсутствует
+      And inspection не изменил durable state
+
+  @format:корень-состояния-и-layout @cli:read-only-run-inspection
   Rule: Run list вычисляет состояние без побочных эффектов
 
     Scenario: Пустой корень даёт пустой список
@@ -54,10 +67,12 @@ Feature: Read-only inspection durable runs
         | format      |
         | workflow-id |
 
-  @spec:read-only-inspection @workflow:initial-activation-dependencies-и-frontier @format:materialized-workflow @format:agent-attempt-record @cli:read-only-run-inspection
+  @workflow:initial-activation-dependencies-и-frontier @format:materialized-workflow @format:agent-attempt-record @cli:read-only-run-inspection
   Rule: Run show отображает validated read model
 
-    Scenario: Active run показывает Steps attempts sessions и frontier
+    Последняя session и status attempts и run вычисляются из полной durable-модели и отдельно не сохраняются.
+
+    Scenario: Active run вычисляет status и показывает последнюю session, Steps, attempts и frontier
       Given подготовлен active durable run с session и ready Step
       When выполняется run show 20 через публичный API
       Then inspection завершается с кодом 0
@@ -78,7 +93,7 @@ Feature: Read-only inspection durable runs
       Then inspection завершается с кодом 4
       And inspection output пуст
 
-  @spec:read-only-inspection @format:artifact @format:идентификаторы-и-номера @cli:read-only-run-inspection
+  @format:artifact @format:идентификаторы-и-номера @cli:read-only-run-inspection
   Rule: Run artifact выбирает точную durable версию
 
     @process
@@ -102,7 +117,7 @@ Feature: Read-only inspection durable runs
         | 0       | missing | 4    |
         | 1       | result  | 4    |
 
-  @spec:read-only-inspection @format:artifact @cli:read-only-run-inspection
+  @format:artifact @cli:read-only-run-inspection
   Rule: Run artifacts перечисляет только опубликованные версии
 
     Scenario: Typed API возвращает artifact descriptors
@@ -127,7 +142,7 @@ Feature: Read-only inspection durable runs
       Then inspection завершается с кодом 0
       And inspection output пуст
 
-  @spec:read-only-inspection @cli:read-only-run-inspection
+  @cli:read-only-run-inspection
   Rule: Inspection renderers используют одну typed model
 
     @process
@@ -144,8 +159,10 @@ Feature: Read-only inspection durable runs
       Then inspection завершается с кодом 0
       And inspection output содержит только completed run
 
-  @spec:read-only-inspection @cli:read-only-run-inspection
+  @cli:read-only-run-inspection
   Rule: Run watch публикует только изменившиеся snapshots
+
+    Watch немедленно публикует initial typed snapshot, затем с фиксированным интервалом 100 ms публикует только изменившиеся validated snapshots и завершается на blocked, completed или поддерживаемом termination signal.
 
     @process
     Scenario: Terminal initial snapshot завершает watch
@@ -155,8 +172,26 @@ Feature: Read-only inspection durable runs
       And watch опубликовал один JSON snapshot
       And inspection не изменил durable state
 
-  @spec:read-only-inspection @cli:read-only-run-inspection
+    @process
+    Scenario: Active watch игнорирует volatile entries и публикует durable completion
+      Given подготовлен active durable run 10 без session
+      When watch наблюдает изменения lock и временного entry до durable completion
+      Then inspection завершается с кодом 0
+      And watch опубликовал initial active и final completed snapshots
+      And watch не публиковал snapshot для volatile изменений за три polling interval
+
+    @process
+    Scenario: SIGTERM завершает active watch общим signal exit code
+      Given подготовлен active durable run 10 без session
+      When active watch получает SIGTERM после initial snapshot
+      Then inspection завершается с кодом 143
+      And watch опубликовал только initial active snapshot
+      And inspection не изменил durable state
+
+  @cli:read-only-run-inspection
   Rule: Run verify формирует полный отчёт до exit code
+
+    Verify с явно выбранным RunId проверяет только этот run.
 
     @process
     Scenario: Verify продолжает после invalid run
@@ -164,4 +199,12 @@ Feature: Read-only inspection durable runs
       When запускается orchestrator run verify в JSON
       Then inspection завершается с кодом 3
       And verify JSON report содержит все три runs по RunId и diagnostics каждого invalid run
+      And inspection не изменил durable state
+
+    @process
+    Scenario: Явный RunId изолирует verify от противоречивых соседних runs
+      Given подготовлены valid и два противоречивых durable runs
+      When запускается orchestrator run verify 10 в JSON
+      Then inspection завершается с кодом 0
+      And verify JSON report содержит только valid run 10
       And inspection не изменил durable state

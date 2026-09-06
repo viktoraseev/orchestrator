@@ -45,7 +45,7 @@ Feature: Read-only workflow tooling
       Then workflow tool завершается с кодом 3
       And workflow tool stdout пуст
 
-  @workflow:модель-graph @workflow:validation @cli:source-catalogs
+  @workflow:validation @cli:source-catalogs
   Rule: Workflow graph проверяет только source topology
 
     Scenario: Typed graph сохраняет bootstrap, nodes и dependency edges

@@ -1,9 +1,10 @@
 Feature: Durable lifecycle run
   Run — один сохраняемый запуск materialized workflow; attempts и artifacts образуют его durable-модель, а текущая позиция и состояние вычисляются из неё. Lifecycle создаёт и продолжает run только через подтверждённую durable-модель.
 
-  @cli:start @format:materialized-workflow @format:agent-attempt-record @workflow:initial-activation-dependencies-и-frontier
+  @cli:start @format:materialized-workflow @format:agent-attempt-record
   Rule: Start обещает только durable run
     После общего preflight start резервирует и блокирует run, durable-публикует проверенный materialized workflow до initial attempt и запускает Agent только после обеих публикаций; возврат Agent process без принятого completion оставляет attempt незавершённым и завершает команду runtime failure без автоматического повторного запуска или native resume в этой lifecycle-команде.
+    Source workflow, prompts и Agents проверяются и materialize’ятся в памяти до создания run; опубликованный snapshot сохраняет порядок Steps для scheduling и не меняется вслед за source files.
 
     Scenario: Agent возвращает управление без completion
       Given подготовлен single-step workflow без outputs

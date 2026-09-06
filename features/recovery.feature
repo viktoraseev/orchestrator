@@ -31,7 +31,7 @@ Feature: Восстановление durable run
       And Agent не запускается повторно
       And lifecycle сообщает already completed
 
-  @workflow:initial-activation-dependencies-и-frontier @format:agent-attempt-record @format:artifact @cli:resume
+  @format:agent-attempt-record @format:artifact @cli:resume
   Rule: Номера attempts глобальны и не переиспользуются
     Attempt существует только после атомарной публикации record; первый attempt получает номер 0, а каждый следующий — номер больше любого опубликованного или зарезервированного crash-остатком номера во всём run, поэтому пропуски не заполняются.
 

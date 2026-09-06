@@ -1,9 +1,11 @@
 Feature: Выполнение workflow graph
   Attempt — одна обработка Step activation выбранным Agent или Process executor; его первая durable-публикация фиксирует input mapping, а durable facts определяют frontier и глобальную нумерацию attempts.
 
-  @workflow:initial-activation-dependencies-и-frontier @workflow:inputs-и-prompt @workflow:fail-fast-input-validation @format:agent-attempt-record
+  @workflow:fail-fast-input-validation @format:agent-attempt-record
   Rule: Линейный target получает зафиксированную версию source artifacts
     Scheduling создаёт attempt только для ready activation и первой durable-публикацией навсегда фиксирует выбранные source attempts; Agent получает UTF-8 prompt и input mapping с artifact-ключами `(source-step-id, input-id)`.
+    Input mapping принадлежит target attempt, содержит по одному выбранному source attempt для каждого dependency и передаёт все outputs успешно завершённого source attempt как `(source-step-id, input-id) → artifact path`; отдельной сущности Input нет, а одинаковые InputId разных source Steps различаются по StepId.
+    Durable artifact имеет ключ `(attempt-n, step-id, input-id)`, все его версии сохраняются для истории, а поздние versions не меняют input mapping, prompt или argv уже созданного attempt.
 
     Scenario: Target получает path, content и durable input source attempt
       Given подготовлен линейный workflow source → target
@@ -19,8 +21,12 @@ Feature: Выполнение workflow graph
       Then lifecycle завершается с кодом 3
       And target attempt 1 не создан
 
-  @workflow:модель-graph @workflow:initial-activation-dependencies-и-frontier @workflow:циклы-terminal-и-blocked-run @workflow:планирование @cli:resume
+  @workflow:циклы-terminal-и-blocked-run @workflow:планирование @cli:resume
   Rule: Fan-out и fan-in frontier вычисляется из durable attempts
+    Workflow является ориентированным графом упорядоченных Steps; каждый Step исполняется ровно одним Agent или Process executor, а `depends-on` задаёт зависимости от успешно завершённых source Steps, включая Steps без outputs, но не от отдельных artifacts.
+    Успешное завершение source Step открывает безусловный fan-out во все target Steps; условий `when` и выбора ветви по artifacts нет.
+    Frontier вычисляется из durable attempts, содержит каждый ready Step не более одного раза и требует для каждого dependency успешно завершённую source version новее выбранной предыдущей activation нижней границы.
+    У Step существует не более одного незавершённого attempt; новые dependency versions не создают параллельную activation, а после completion следующий pass выбирает последние доступные versions и сохраняет промежуточные в истории.
 
     Scenario: Diamond graph создаёт fan-out в порядке Steps и затем fan-in
       Given подготовлен diamond workflow
@@ -35,8 +41,10 @@ Feature: Выполнение workflow graph
       Then lifecycle завершается с кодом 0
       And join Agent получает inputs left:shared и right:shared
 
-  @workflow:initial-activation-dependencies-и-frontier @workflow:циклы-terminal-и-blocked-run @cli:resume
+  @workflow:циклы-terminal-и-blocked-run @cli:resume
   Rule: Циклический workflow повторно активирует Steps по свежим artifacts
+    Start создаёт bootstrap activation первого описанного Step как attempt 0 с пустым input; его `depends-on` игнорируется только один раз и применяется при повторных activations.
+    Новая activation выбирает для каждого dependency уже завершённый source attempt с максимальным номером меньше собственного, фиксирует выбранные numbers навсегда и не может повторно использовать нижнюю границу предыдущей activation.
 
     Scenario: Первый повторный обход использует feedback вместо bootstrap input
       Given подготовлен циклический workflow a → b → c → a
@@ -55,7 +63,7 @@ Feature: Выполнение workflow graph
       And следующий b получает input 3
       And attempts первого обхода и их artifacts не изменены
 
-  @workflow:циклы-terminal-и-blocked-run @workflow:initial-activation-dependencies-и-frontier @cli:resume @cli:коды-завершения
+  @workflow:циклы-terminal-и-blocked-run @cli:resume @cli:коды-завершения
   Rule: Частично удовлетворённая dependency group блокирует run детерминированно
 
     Scenario: Повторный resume сохраняет blocked run без побочных эффектов

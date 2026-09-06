@@ -1,8 +1,10 @@
 Feature: Исполнение произвольных процессов в workflow graph
   Process executor — materialized executable, cwd, argv и optional stdout output обычного non-human Step; он не является Agent type, не имеет native session или control context и завершает attempt только через проверенный exit и supervisor-owned artifact commit.
 
-  @format:workflow-template @workflow:inputs-и-prompt @cli:start @cli:сигналы-и-закрытие-терминала @cli:вывод-команд
+  @format:workflow-template @cli:start @cli:сигналы-и-закрытие-терминала @cli:вывод-команд
   Rule: Process получает materialized argv, environment и non-interactive process boundary
+    Step executor является ровно одним Agent или Process; Process запускает materialized executable с argv, не является Agent type и не участвует в native session protocol.
+    Объявленный строковый run parameter проверяется до резервирования run, сохраняется в materialized workflow и имеет одно неизменное durable значение в argv каждого Process attempt.
     Допустимые формы placeholders: {{param:<parameter-id>}}, {{path:<step-id>:<input-id>}} и {{output:<input-id>}}; content placeholder запрещён.
     Перед запуском Process supervisor создаёт уникальный staging regular-file path для каждого объявленного output, передаёт mapping в ORC_OUTPUT и разрешает {{output:…}} в argv в соответствующий path; Process может создать или заменить этот файл, но не пишет durable artifact напрямую.
     Process наследует environment supervisor с заменой ORC_STEP_ID, ORC_RUN_ID, ORC_ATTEMPT, ORC_INPUT и ORC_OUTPUT, запускается отдельной process group с stdin: null, наследуемым stderr и stdout согласно stdout; stdout: <input-id> направляет точные bytes stdout в staging path этого output, а без stdout stdout наследуется.

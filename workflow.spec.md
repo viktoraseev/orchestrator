@@ -1,39 +1,6 @@
 # Workflow graph: спецификация
 
-Этот документ определяет семантику workflow graph, его validation и правила, по которым graph engine создаёт activations. Формат workflow-файла и описание его полей определены в `format.spec.md`, Run storage, Agent attempts и управление процессами — в `features/*.feature`, а публичное поведение CLI — в `cli.md`.
-
-## Модель graph
-
-- **Workflow** — ориентированный граф Steps. До создания run source workflow, prompt templates и Agents проверяются и materialize’ятся в кандидат snapshot в памяти; `start` durable-публикует проверенный кандидат только после резервирования run. Изменение source files после публикации не меняет run. Порядок Steps сохраняется и является частью scheduling.
-- **Run parameter** — объявленное workflow строковое значение, которое `start` получает явно, проверяет до резервирования run и сохраняет в materialized workflow; Process args каждого attempt используют одно и то же durable значение.
-- **Step executor** — ровно один из Agent или Process; Agent adapter владеет native session protocol, а Process запускает materialized executable с argv и не является Agent type.
-- **Step** — узел графа. `depends-on` перечисляет source Steps, успешное завершение которых требуется для activation. Зависимостей от отдельных artifacts нет.
-- **Input mapping** принадлежит конкретному target attempt и использует пару `(source-step-id, input-id)` как ключ artifact: StepId определяет выбранный source Step, а InputId — один из объявленных им `outputs`. Отдельной сущности Input с собственным ID нет.
-- **Artifact в graph** имеет ключ `(attempt-n, step-id, input-id)`. Все версии хранятся для истории. К inputs доступен только artifact успешно завершённого source attempt.
-
-Успешный attempt публикует ровно все artifacts, объявленные в `outputs`. Поэтому выбор source attempt однозначно определяет полный набор inputs от этого Step. Step с пустым `outputs` также может быть dependency: его завершённый attempt является версией зависимости, даже если не передаёт artifacts.
-
-## Initial activation, dependencies и frontier
-
-`start` создаёт initial activation первого описанного Step с пустым input и номером attempt `0`. Это обычная activation; отдельной схемы entry Step нет. `depends-on` первого Step игнорируется только для этой bootstrap-activation и применяется ко всем его последующим activations.
-
-Каждый StepId в `depends-on` образует ориентированное ребро от source Step в target Step. Успешное завершение одного Step открывает fan-out во все target Steps, которые от него зависят. Условных transitions, `when` и выбора ветви по набору опубликованных artifacts нет.
-
-Frontier — вычисляемое множество ready Steps. Один Step присутствует в нём не более одного раза. После initial activation Step становится ready, когда у него нет незавершённого attempt и для каждого его dependency существует успешно завершённый source attempt новее нижней границы этой зависимости. Нижняя граница — source attempt, выбранный предыдущей activation этого target Step; initial activation с пустым input границ не создаёт.
-
-У каждого Step может существовать не более одного незавершённого attempt независимо от `human`. Пока он не завершён терминальным `completed`, новые версии dependencies не создают параллельную activation этого Step; после его завершения следующий scheduling pass выбирает самые новые доступные source attempts, а промежуточные версии остаются историей.
-
-Принятый `attempt complete` работающего процесса не завершает source attempt и не изменяет frontier; attempt становится успешно завершённым только после фиксации возврата процесса с последним кандидатом по Rule «Completion становится durable только после возврата Agent» в `features/artifact_completion.feature`.
-
-Для новой activation выбирается доступный source attempt с максимальным номером для каждого dependency. Его номер должен быть меньше номера создаваемого attempt. Выбранные номера фиксируются при создании attempt, и более поздние source attempts их не меняют. Если между activations завершилось несколько attempts одного source Step, выбирается только последний; остальные остаются историей.
-
-Например, attempt `review` с номером `11` не может выбрать source attempt `15`; attempt `review` с номером `16` выбирает `15`, если он уже успешно завершён при создании `16`. Следующая activation `review` обязана выбрать более новый attempt того же dependency и не может повторно использовать `15`.
-
-## Inputs и prompt
-
-Input activation содержит по одному выбранному source attempt для каждого StepId из `depends-on`. Все объявленные `outputs` выбранного source attempt передаются target Step как mapping `(step-id, input-id) → artifact path`. Именно в этом mapping пара является ключом. InputIds разных source Steps могут совпадать, поскольку StepId устраняет неоднозначность.
-
-Agent type получает mapping вместе с materialized Agent и сформированным prompt. Позднее появившиеся версии artifacts не изменяют mapping, prompt или argv уже запущенного attempt.
+Этот документ определяет оставшуюся семантику cycles, terminal и blocked run, planning и validation workflow graph. Модель graph, activations, frontier и inputs определена в `features/*.feature`, формат workflow-файла и описание его полей — в `format.spec.md`, а публичное поведение CLI — в `cli.md`.
 
 ## Циклы, terminal и blocked run
 

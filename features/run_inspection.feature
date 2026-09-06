@@ -67,7 +67,7 @@ Feature: Read-only inspection durable runs
         | format      |
         | workflow-id |
 
-  @workflow:initial-activation-dependencies-и-frontier @format:materialized-workflow @format:agent-attempt-record @cli:read-only-run-inspection
+  @format:materialized-workflow @format:agent-attempt-record @cli:read-only-run-inspection
   Rule: Run show отображает validated read model
 
     Последняя session и status attempts и run вычисляются из полной durable-модели и отдельно не сохраняются.

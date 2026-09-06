@@ -1,7 +1,7 @@
 # Форматы файлов orchestrator
 
 - Этот документ является единственным источником требований к layout состояния, именам файлов и их содержимому.
-- Семантика run и attempts определена в `features/*.feature`, workflow graph — в `workflow.spec.md`, а команды и наблюдаемое поведение CLI — в `cli.md`.
+- Семантика run, attempts, модели graph, activations, frontier и inputs определена в `features/*.feature`, оставшиеся правила cycles, planning и validation — в `workflow.spec.md`, а команды и наблюдаемое поведение CLI — в `cli.md`.
 
 ## Корень состояния и layout
 

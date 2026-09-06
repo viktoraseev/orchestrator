@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod catalog;
 pub mod config;
+mod domain;
 pub mod run;
 pub mod workflow;
 

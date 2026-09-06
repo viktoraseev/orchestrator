@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentRegistry, BuiltinAgentRegistry};
-use crate::config::{
-    CommandError, ProcessEnvironment, RawAgent, RawConfig, read_config, resolve_state_root,
-};
+use crate::config::{CommandError, ProcessEnvironment, RawConfig, read_config, resolve_state_root};
+use crate::domain::{Agent, ProcessStep, Step, SymbolicId, Workflow};
 use crate::run::InspectionFormat;
+
+pub use crate::domain::WorkflowId;
 
 /// Запрос полной проверки workflow после разбора CLI.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,59 +32,17 @@ impl ValidateCommand {
     ///
     /// Возвращает [`CommandError::Syntax`], если `WorkflowId` не соответствует kebab-case.
     pub fn explicit(value: &str) -> Result<Self, CommandError> {
-        WorkflowId::parse(value).map(Self::Explicit)
+        WorkflowId::parse(value)
+            .map(Self::Explicit)
+            .map_err(|context| CommandError::Syntax {
+                context: format!("validate: {context}"),
+            })
     }
 
     /// Создаёт запрос проверки workflow из `default-workflow` config.
     #[must_use]
     pub const fn configured_default() -> Self {
         Self::ConfiguredDefault
-    }
-}
-
-/// Проверенный идентификатор workflow, безопасный для построения пути template.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct WorkflowId(String);
-
-impl WorkflowId {
-    fn parse(value: &str) -> Result<Self, CommandError> {
-        SymbolicId::parse("WorkflowId", value)
-            .map(|id| Self(id.into_string()))
-            .map_err(|context| CommandError::Syntax {
-                context: format!("validate: {context}"),
-            })
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct SymbolicId(String);
-
-impl SymbolicId {
-    pub(crate) fn parse(kind: &str, value: &str) -> Result<Self, String> {
-        let valid = !value.is_empty()
-            && value.split('-').all(|part| {
-                !part.is_empty()
-                    && part
-                        .bytes()
-                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-            });
-        if valid {
-            Ok(Self(value.to_owned()))
-        } else {
-            Err(format!("{kind} '{value}' не соответствует kebab-case"))
-        }
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub(crate) fn into_string(self) -> String {
-        self.0
     }
 }
 
@@ -114,33 +73,6 @@ pub(crate) struct RawProcess {
     pub(crate) args: Vec<String>,
     pub(crate) cwd: Option<String>,
     pub(crate) stdout: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ProcessStep {
-    pub(crate) executable: PathBuf,
-    pub(crate) args: Vec<String>,
-    pub(crate) cwd: PathBuf,
-    pub(crate) stdout: Option<SymbolicId>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Step {
-    pub(crate) id: SymbolicId,
-    pub(crate) agent: Option<RawAgent>,
-    pub(crate) prompt: Option<String>,
-    pub(crate) human: bool,
-    pub(crate) process: Option<ProcessStep>,
-    pub(crate) depends_on: Vec<SymbolicId>,
-    pub(crate) outputs: Vec<SymbolicId>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Workflow {
-    pub(crate) id: WorkflowId,
-    pub(crate) max_parallel_agents: usize,
-    pub(crate) parameters: Vec<SymbolicId>,
-    pub(crate) steps: Vec<Step>,
 }
 
 /// Один результат полного bulk preflight source workflow.
@@ -468,7 +400,7 @@ pub fn execute_validate_with_registry(
                         .to_owned(),
                 });
             };
-            configured_workflow_id = WorkflowId(value.clone());
+            configured_workflow_id = WorkflowId::from_validated(value.clone());
             &configured_workflow_id
         }
     };
@@ -655,7 +587,7 @@ pub fn execute_workflow_plan(
 impl From<Workflow> for WorkflowPlan {
     fn from(workflow: Workflow) -> Self {
         Self {
-            workflow_id: workflow.id.into_string(),
+            workflow_id: workflow.id.as_str().to_owned(),
             max_parallel_agents: workflow.max_parallel_agents,
             parameters: workflow
                 .parameters
@@ -693,12 +625,6 @@ impl From<Workflow> for WorkflowPlan {
                 })
                 .collect(),
         }
-    }
-}
-
-impl WorkflowId {
-    fn into_string(self) -> String {
-        self.0
     }
 }
 
@@ -1196,7 +1122,7 @@ pub(crate) fn materialize_for_lifecycle(
                     ),
                 });
             };
-            configured_workflow_id = WorkflowId(value.clone());
+            configured_workflow_id = WorkflowId::from_validated(value.clone());
             &configured_workflow_id
         }
     };
@@ -1286,7 +1212,7 @@ fn resolve_agent(
     step_id: &str,
     explicit_agent: Option<&str>,
     config: &RawConfig,
-) -> Result<RawAgent, CommandError> {
+) -> Result<Agent, CommandError> {
     let agent_id = explicit_agent
         .or(config.default_agent.as_deref())
         .ok_or_else(|| {

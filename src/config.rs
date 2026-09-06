@@ -12,6 +12,9 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
 
 use crate::agent::{AgentRegistry, BuiltinAgentRegistry};
+use crate::domain::Agent;
+
+pub use crate::domain::{AgentId, WorkflowId};
 
 const DEFAULT_MAX_PARALLEL_AGENTS: usize = 5;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -80,7 +83,11 @@ impl ConfigCommand {
     ///
     /// Возвращает [`CommandError::Syntax`], если ID не соответствует kebab-case.
     pub fn set_default_workflow(value: &str) -> Result<Self, CommandError> {
-        WorkflowId::parse(value).map(Self::SetDefaultWorkflow)
+        WorkflowId::parse(value)
+            .map(Self::SetDefaultWorkflow)
+            .map_err(|context| CommandError::Syntax {
+                context: format!("config set default-workflow: {context}"),
+            })
     }
 
     /// Создаёт команду выбора Agent из CLI-значения.
@@ -89,41 +96,11 @@ impl ConfigCommand {
     ///
     /// Возвращает [`CommandError::Syntax`], если ID не соответствует kebab-case.
     pub fn set_default_agent(value: &str) -> Result<Self, CommandError> {
-        AgentId::parse(value).map(Self::SetDefaultAgent)
-    }
-}
-
-/// Проверенный файловый идентификатор workflow.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkflowId(String);
-
-impl WorkflowId {
-    fn parse(value: &str) -> Result<Self, CommandError> {
-        validate_id("WorkflowId", value).map_err(|context| CommandError::Syntax {
-            context: format!("config set default-workflow: {context}"),
-        })?;
-        Ok(Self(value.to_owned()))
-    }
-
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Проверенный идентификатор именованного Agent.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AgentId(String);
-
-impl AgentId {
-    fn parse(value: &str) -> Result<Self, CommandError> {
-        validate_id("AgentId", value).map_err(|context| CommandError::Syntax {
-            context: format!("config set default-agent: {context}"),
-        })?;
-        Ok(Self(value.to_owned()))
-    }
-
-    fn as_str(&self) -> &str {
-        &self.0
+        AgentId::parse(value)
+            .map(Self::SetDefaultAgent)
+            .map_err(|context| CommandError::Syntax {
+                context: format!("config set default-agent: {context}"),
+            })
     }
 }
 
@@ -207,28 +184,7 @@ pub(crate) struct RawConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_parallel_agents: Option<usize>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) agents: BTreeMap<String, RawAgent>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawAgent {
-    #[serde(deserialize_with = "deserialize_string")]
-    pub(crate) r#type: String,
-    #[serde(deserialize_with = "deserialize_string")]
-    pub(crate) model: String,
-    #[serde(deserialize_with = "deserialize_string")]
-    pub(crate) reasoning: String,
-}
-
-fn deserialize_string<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    match serde_yaml::Value::deserialize(deserializer)? {
-        serde_yaml::Value::String(value) => Ok(value),
-        value => Err(de::Error::custom(format!("expected string, got {value:?}"))),
-    }
+    pub(crate) agents: BTreeMap<String, Agent>,
 }
 
 fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -605,17 +561,17 @@ mod tests {
     #[test]
     fn agent_validation_rejects_unknown_type_and_empty_fields() {
         for agent in [
-            RawAgent {
+            Agent {
                 r#type: "unknown".to_owned(),
                 model: "model".to_owned(),
                 reasoning: "high".to_owned(),
             },
-            RawAgent {
+            Agent {
                 r#type: "codex".to_owned(),
                 model: String::new(),
                 reasoning: "high".to_owned(),
             },
-            RawAgent {
+            Agent {
                 r#type: "claude".to_owned(),
                 model: "model".to_owned(),
                 reasoning: String::new(),

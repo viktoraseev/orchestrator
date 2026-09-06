@@ -23,8 +23,14 @@ use crate::agent::{
     AgentCancellation, AgentInput, AgentRegistry, AgentRunRequest, AttemptControl,
     BuiltinAgentRegistry, TerminationSignal, wait_for_child,
 };
-use crate::config::{CommandError, ProcessEnvironment, RawAgent, resolve_state_root};
-use crate::workflow::{SymbolicId, ValidateCommand, Workflow, materialize_for_lifecycle};
+use crate::config::{CommandError, ProcessEnvironment, resolve_state_root};
+use crate::domain::{
+    AttemptRecord, DurableAttempt, MaterializedProcess, MaterializedStep, MaterializedWorkflow,
+    SymbolicId,
+};
+use crate::workflow::{ValidateCommand, materialize_for_lifecycle};
+
+pub use crate::domain::RunId;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const INSPECTION_SNAPSHOT_ATTEMPTS: usize = 4;
@@ -135,32 +141,6 @@ impl LifecycleCommand {
             selection: ValidateCommand::ConfiguredDefault,
             parameters,
         }
-    }
-}
-
-/// Проверенный десятичный идентификатор run.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RunId(u64);
-
-impl RunId {
-    /// Разбирает обязательный CLI `RunId`.
-    ///
-    /// # Errors
-    ///
-    /// Возвращает [`CommandError::Syntax`], если значение не является десятичным целым.
-    pub fn parse(value: &str) -> Result<Self, CommandError> {
-        value
-            .parse::<u64>()
-            .map(Self)
-            .map_err(|_| CommandError::Syntax {
-                context: format!("resume: RunId '{value}' должен быть десятичным integer"),
-            })
-    }
-}
-
-impl std::fmt::Display for RunId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
     }
 }
 
@@ -680,7 +660,7 @@ pub fn execute_run_show(
         let step = &run.workflow.steps[attempt.step_index];
         let inputs = attempt
             .record
-            .input
+            .input()
             .iter()
             .map(u64::to_string)
             .collect::<Vec<_>>();
@@ -921,103 +901,6 @@ pub fn open_run_artifact(
     })
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-struct MaterializedWorkflow {
-    workflow_id: String,
-    max_parallel_agents: usize,
-    #[serde(default)]
-    parameters: BTreeMap<String, String>,
-    steps: Vec<MaterializedStep>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-struct MaterializedStep {
-    id: String,
-    agent: Option<RawAgent>,
-    prompt: Option<String>,
-    human: bool,
-    process: Option<MaterializedProcess>,
-    depends_on: Vec<String>,
-    outputs: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct MaterializedProcess {
-    executable: PathBuf,
-    args: Vec<String>,
-    cwd: PathBuf,
-    stdout: Option<String>,
-}
-
-impl MaterializedWorkflow {
-    fn from_workflow(workflow: Workflow, parameters: BTreeMap<String, String>) -> Self {
-        Self {
-            workflow_id: workflow.id.as_str().to_owned(),
-            max_parallel_agents: workflow.max_parallel_agents,
-            parameters,
-            steps: workflow
-                .steps
-                .into_iter()
-                .map(|step| MaterializedStep {
-                    id: step.id.as_str().to_owned(),
-                    agent: step.agent,
-                    prompt: step.prompt,
-                    human: step.human,
-                    process: step.process.map(|process| MaterializedProcess {
-                        executable: process.executable,
-                        args: process.args,
-                        cwd: process.cwd,
-                        stdout: process.stdout.map(|id| id.as_str().to_owned()),
-                    }),
-                    depends_on: step
-                        .depends_on
-                        .into_iter()
-                        .map(|id| id.as_str().to_owned())
-                        .collect(),
-                    outputs: step
-                        .outputs
-                        .into_iter()
-                        .map(|id| id.as_str().to_owned())
-                        .collect(),
-                })
-                .collect(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct AttemptRecord {
-    input: Vec<u64>,
-    events: Vec<AttemptEvent>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
-enum AttemptEvent {
-    SessionActivated {
-        #[serde(rename = "session-id")]
-        session_id: String,
-    },
-    Completed,
-}
-
-impl AttemptRecord {
-    fn is_completed(&self) -> bool {
-        matches!(self.events.last(), Some(AttemptEvent::Completed))
-    }
-
-    fn last_session(&self) -> Option<&str> {
-        self.events.iter().rev().find_map(|event| match event {
-            AttemptEvent::SessionActivated { session_id } => Some(session_id.as_str()),
-            AttemptEvent::Completed => None,
-        })
-    }
-}
-
 struct RunGuard {
     directory: PathBuf,
     _lock: File,
@@ -1137,10 +1020,7 @@ fn start(
         .ok_or_else(|| CommandError::Invalid {
             context: "start: materialized workflow не содержит Steps".to_owned(),
         })?;
-    let record = AttemptRecord {
-        input: Vec::new(),
-        events: Vec::new(),
-    };
+    let record = AttemptRecord::pending(Vec::new());
     publish_yaml(
         &guard.directory,
         &attempt_name(0, &first.id),
@@ -1586,13 +1466,6 @@ fn cleanup_process_outputs(paths: &BTreeMap<String, PathBuf>) {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DurableAttempt {
-    number: u64,
-    step_index: usize,
-    record: AttemptRecord,
-}
-
 #[derive(Clone, Copy)]
 enum SchedulerOutcome {
     Completed(bool),
@@ -1917,7 +1790,7 @@ impl InspectedRun {
                     AttemptInspectionState::Active
                 },
                 session: attempt.record.last_session().map(str::to_owned),
-                input: attempt.record.input.clone(),
+                input: attempt.record.input().to_vec(),
             })
             .collect();
         let frontier = FrontierInspection {
@@ -2322,7 +2195,7 @@ fn compute_frontier(
                 .map(|attempt| attempt.number)
                 .max();
             let lower_bound =
-                previous.and_then(|attempt| attempt.record.input.get(dependency_index).copied());
+                previous.and_then(|attempt| attempt.record.input().get(dependency_index).copied());
             fresh.push(latest.is_some_and(|number| lower_bound.is_none_or(|bound| number > bound)));
         }
         if fresh.iter().all(|value| *value) {
@@ -2367,10 +2240,7 @@ fn publish_ready_attempts(
                 .ok_or_else(|| invalid_run(run_id, "ready Step не имеет completed dependency"))?;
             input.push(source.number);
         }
-        let record = AttemptRecord {
-            input,
-            events: Vec::new(),
-        };
+        let record = AttemptRecord::pending(input);
         let candidate = DurableAttempt {
             number: next,
             step_index,
@@ -2535,9 +2405,7 @@ fn activate_session(
     if state.record.last_session() == Some(session_id) {
         return Ok(());
     }
-    state.record.events.push(AttemptEvent::SessionActivated {
-        session_id: session_id.to_owned(),
-    });
+    state.record.activate_session(session_id.to_owned());
     let _storage = lock_storage(&state.storage)?;
     publish_yaml(
         &state.run_directory,
@@ -2617,7 +2485,7 @@ fn finalize_completion(
     }
     let path = directory.join(attempt_name(attempt, &step.id));
     let mut record: AttemptRecord = read_yaml(&path, "attempt complete")?;
-    record.events.push(AttemptEvent::Completed);
+    record.complete();
     publish_yaml(
         directory,
         &attempt_name(attempt, &step.id),
@@ -2903,115 +2771,9 @@ fn validate_materialized(
     registry: &dyn AgentRegistry,
     run_id: RunId,
 ) -> Result<(), CommandError> {
-    if workflow.max_parallel_agents == 0
-        || workflow.steps.is_empty()
-        || !valid_id(&workflow.workflow_id)
-        || workflow
-            .parameters
-            .iter()
-            .any(|(id, value)| !valid_id(id) || value.contains('\0'))
-    {
-        return Err(invalid_run(run_id, "невалидный materialized workflow"));
-    }
-    let mut ids = HashSet::with_capacity(workflow.steps.len());
-    for step in &workflow.steps {
-        let outputs: HashSet<&str> = step.outputs.iter().map(String::as_str).collect();
-        if !valid_id(&step.id)
-            || !ids.insert(step.id.as_str())
-            || outputs.len() != step.outputs.len()
-            || step.outputs.iter().any(|id| !valid_id(id))
-        {
-            return Err(invalid_run(
-                run_id,
-                "невалидные или повторяющиеся Step/Input IDs",
-            ));
-        }
-        match (&step.agent, &step.process) {
-            (Some(agent), None) => registry
-                .validate(&agent.r#type, &agent.model, &agent.reasoning)
-                .map_err(|context| invalid_run(run_id, &context))?,
-            (None, Some(process)) => {
-                if step.human
-                    || step.prompt.is_some()
-                    || !process.executable.is_absolute()
-                    || !process.cwd.is_absolute()
-                    || process
-                        .stdout
-                        .as_ref()
-                        .is_some_and(|id| !step.outputs.contains(id))
-                {
-                    return Err(invalid_run(run_id, "невалидный materialized Process Step"));
-                }
-            }
-            _ => {
-                return Err(invalid_run(
-                    run_id,
-                    "Step должен содержать ровно один Agent или Process executor",
-                ));
-            }
-        }
-    }
-    for step in &workflow.steps {
-        let dependencies: HashSet<&str> = step.depends_on.iter().map(String::as_str).collect();
-        if dependencies.len() != step.depends_on.len()
-            || step
-                .depends_on
-                .iter()
-                .any(|dependency| !ids.contains(dependency.as_str()))
-        {
-            return Err(invalid_run(
-                run_id,
-                "depends-on повторяется или ссылается на неизвестный Step",
-            ));
-        }
-        if let Some(process) = &step.process {
-            for argument in &process.args {
-                validate_materialized_process_argument(workflow, step, argument, run_id)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_materialized_process_argument(
-    workflow: &MaterializedWorkflow,
-    step: &MaterializedStep,
-    argument: &str,
-    run_id: RunId,
-) -> Result<(), CommandError> {
-    if argument.contains('\0') {
-        return Err(invalid_run(run_id, "Process argv содержит NUL"));
-    }
-    if !argument.contains("{{") && !argument.contains("}}") {
-        return Ok(());
-    }
-    let body = argument
-        .strip_prefix("{{")
-        .and_then(|value| value.strip_suffix("}}"))
-        .ok_or_else(|| invalid_run(run_id, "Process placeholder не занимает весь argv element"))?;
-    let parts = body.split(':').collect::<Vec<_>>();
-    let valid = match parts.as_slice() {
-        ["param", parameter] => workflow.parameters.contains_key(*parameter),
-        ["path", source_step, input_id] => {
-            step.depends_on
-                .iter()
-                .any(|dependency| dependency == source_step)
-                && workflow.steps.iter().any(|source| {
-                    source.id == *source_step
-                        && source.outputs.iter().any(|output| output == input_id)
-                })
-        }
-        ["output", output] => step.outputs.iter().any(|candidate| candidate == output),
-        _ => false,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(invalid_run(
-            run_id,
-            "невалидный materialized Process placeholder",
-        ))
-    }
+    workflow
+        .validate(registry)
+        .map_err(|message| invalid_run(run_id, &message))
 }
 
 fn load_attempts(
@@ -3071,7 +2833,7 @@ fn load_attempts(
     if attempts.is_empty()
         || attempts[0].number != 0
         || attempts[0].step_index != 0
-        || !attempts[0].record.input.is_empty()
+        || !attempts[0].record.input().is_empty()
     {
         return Err(invalid_run(
             run_id,
@@ -3115,7 +2877,7 @@ fn validate_attempt_input(
         return Ok(());
     }
     let step = &workflow.steps[attempt.step_index];
-    if attempt.record.input.len() != step.depends_on.len() {
+    if attempt.record.input().len() != step.depends_on.len() {
         return Err(invalid_run(
             run_id,
             "attempt input не совпадает с depends-on",
@@ -3130,7 +2892,7 @@ fn validate_attempt_input(
     for (dependency_index, (dependency, source_number)) in step
         .depends_on
         .iter()
-        .zip(&attempt.record.input)
+        .zip(attempt.record.input())
         .enumerate()
     {
         let source_index = workflow
@@ -3169,7 +2931,7 @@ fn validate_attempt_input(
             ));
         }
         if previous
-            .and_then(|candidate| candidate.record.input.get(dependency_index))
+            .and_then(|candidate| candidate.record.input().get(dependency_index))
             .is_some_and(|bound| source_number <= bound)
         {
             return Err(invalid_run(
@@ -3189,7 +2951,7 @@ fn prepare_agent_input(
 ) -> Result<(Vec<AgentInput>, String), CommandError> {
     let step = &workflow.steps[attempt.step_index];
     let mut inputs = Vec::new();
-    for (dependency, source_number) in step.depends_on.iter().zip(&attempt.record.input) {
+    for (dependency, source_number) in step.depends_on.iter().zip(attempt.record.input()) {
         let source = workflow
             .steps
             .iter()
@@ -3283,24 +3045,9 @@ fn validate_record(
     directory: &Path,
     run_id: RunId,
 ) -> Result<(), CommandError> {
-    let mut last_session = None;
-    for (index, event) in record.events.iter().enumerate() {
-        match event {
-            AttemptEvent::SessionActivated { session_id } => {
-                if last_session == Some(session_id.as_str()) {
-                    return Err(invalid_run(run_id, "повтор последней session activation"));
-                }
-                last_session = Some(session_id.as_str());
-            }
-            AttemptEvent::Completed if index + 1 != record.events.len() => {
-                return Err(invalid_run(
-                    run_id,
-                    "completed не является последним событием",
-                ));
-            }
-            AttemptEvent::Completed => {}
-        }
-    }
+    record
+        .validate_history()
+        .map_err(|message| invalid_run(run_id, message))?;
     if record.is_completed() {
         for output in &step.outputs {
             let artifact = directory.join(format!("{attempt}.{}.{output}.artifact", step.id));
@@ -3340,13 +3087,7 @@ fn validate_record(
 }
 
 fn valid_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.split('-').all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        })
+    SymbolicId::is_valid(value)
 }
 
 fn ensure_active(state: &ControlState) -> Result<(), CommandError> {
@@ -3575,10 +3316,7 @@ mod tests {
             run_directory: root.path().to_owned(),
             step_id: "step".to_owned(),
             outputs: vec!["result".to_owned()],
-            record: AttemptRecord {
-                input: Vec::new(),
-                events: Vec::new(),
-            },
+            record: AttemptRecord::pending(Vec::new()),
             candidate: None,
             storage: Arc::new(Mutex::new(())),
         }));

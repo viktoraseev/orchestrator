@@ -9,8 +9,9 @@ use serde::Serialize;
 
 use crate::agent::BuiltinAgentRegistry;
 use crate::config::{CommandError, ProcessEnvironment, read_config, resolve_state_root};
+use crate::domain::SymbolicId;
 use crate::run::InspectionFormat;
-use crate::workflow::{RawProcess, RawStep, RawWorkflow, SymbolicId};
+use crate::workflow::{RawProcess, RawStep, RawWorkflow};
 
 /// Descriptor source workflow template.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

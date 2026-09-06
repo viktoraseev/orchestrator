@@ -281,6 +281,16 @@ fn prepare_candidate(root: &std::path::Path, candidate: &str) {
             root,
             "steps:\n  - id: plan\n    prompt: bad.prompt\n    human: false\n    depends-on: []\n    outputs: []\n",
         ),
+        "parameters не mapping" => write_workflow(
+            root,
+            "parameters: []\nsteps:\n  - id: plan\n    human: false\n    depends-on: []\n    outputs: []\n",
+        ),
+        "неподдерживаемый type parameter" => write_workflow(
+            root,
+            "parameters:\n  mode: integer\nsteps:\n  - id: plan\n    human: false\n    depends-on: []\n    outputs: []\n",
+        ),
+        "steps не sequence" => write_workflow(root, "steps: {}\n"),
+        "повторяющийся root key" => write_workflow(root, "steps: []\nsteps: []\n"),
         "синтаксически невалидный YAML" => {
             write_workflow(root, "steps: [\n");
         }

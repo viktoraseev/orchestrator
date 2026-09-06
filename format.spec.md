@@ -1,7 +1,7 @@
 # Форматы файлов orchestrator
 
-- Этот документ является единственным источником требований к layout состояния, именам файлов и их содержимому.
-- Семантика run, attempts и workflow graph, включая cycles, planning и validation, определена в `features/*.feature`, а команды и наблюдаемое поведение CLI — в `cli.md`.
+- Этот документ является источником требований к durable layout состояния, именам materialized run-файлов и их содержимому.
+- Контракт config, source workflow и prompt templates, а также семантика run, attempts и workflow graph определены в `features/*.feature`, а команды и наблюдаемое поведение CLI — в `cli.md`.
 
 ## Корень состояния и layout
 
@@ -23,75 +23,9 @@ run/<run-id>/<n>.<step-id>.<input-id>.artifact
 
 ## Общие правила YAML
 
-- `config.yaml`, workflow template, materialized workflow и Agent attempt record являются YAML mappings.
+- `config.yaml`, materialized workflow и Agent attempt record являются YAML mappings.
 - Повторяющиеся mapping keys и неизвестные описанной ниже схеме поля запрещены.
 - Нарушение схемы или формата ID делает файл невалидным; поведение использующей его команды определено в `cli.md`.
-
-## Workflow template
-
-- Корневой mapping содержит необязательный `parameters` и обязательный `steps`; `parameters` является mapping уникальных ParameterIds в единственное поддерживаемое значение `string`, а `steps` — непустая упорядоченная последовательность Steps с уникальными StepIds.
-
-- Step является mapping со следующими полями:
-  - `id`: обязательный StepId;
-  - `agent`: необязательный AgentId; при отсутствии используется `default-agent`;
-  - `prompt`: необязательный PromptId;
-  - `process`: необязательный Process mapping с обязательными `executable` и `args`, необязательными `cwd` и `stdout`; `executable` и `cwd` являются строками, `args` — последовательностью строк, `stdout` — InputId из `outputs`;
-  - `human`: обязательный boolean;
-  - `depends-on`: обязательная последовательность уникальных StepIds; может быть пустой;
-  - `outputs`: обязательная последовательность уникальных InputIds; может быть пустой.
-
-- Других полей Step нет. Step без `process` является Agent Step и разрешает Agent через `agent` либо `default-agent`; Step с `process` является Process Step, запрещает `agent`, `prompt` и `human: true` и не требует default Agent.
-- Process `executable` не содержит placeholders; абсолютный путь используется напрямую, относительный путь с `/` разрешается относительно `cwd`, а имя без `/` разрешается через `PATH` команды `start` или preflight-команды; результат обязан указывать на executable regular file.
-- Process `cwd` не содержит placeholders; отсутствующий или относительный `cwd` разрешается относительно current working directory команды, а materialized значение всегда является абсолютным путём существующего directory.
-- `depends-on` описывает зависимости только от Steps, а не от отдельных artifacts.
-- Каждый InputId в `outputs` объявляет один обязательный artifact успешного attempt этого Step.
-- Например:
-```yaml
-steps:
-  - id: plan
-    agent: codex-main
-    prompt: plan
-    human: true
-    depends-on: []
-    outputs:
-      - specification
-  - id: implement
-    prompt: implement
-    human: false
-    depends-on:
-      - plan
-    outputs:
-      - source
-```
-
-- Например Process Step и run parameter:
-```yaml
-parameters:
-  mode: string
-steps:
-  - id: convert
-    process:
-      executable: converter
-      args: ["--mode", "{{param:mode}}", "--input", "{{path:download:source}}", "--output", "{{output:result}}"]
-    human: false
-    depends-on: [download]
-    outputs: [result]
-```
-- Ссылочная целостность, cycles, reachability и семантика зависимостей заданы в `features/*.feature`.
-
-## Prompt template
-
-- Prompt template является произвольным UTF-8 Markdown. YAML-декодирование к нему не применяется.
-- В тексте разрешены ровно два вида placeholders:
-  - `{{path:<step-id>:<input-id>}}` заменяется абсолютным путём к выбранной версии artifact;
-  - `{{content:<step-id>:<input-id>}}` заменяется содержимым выбранной версии artifact без дополнительного экранирования.
-
-- Пробелы внутри placeholder запрещены.
-- StepId обязан находиться в `depends-on` использующего template Step, а InputId — в `outputs` указанного source Step.
-- Неизвестный вид placeholder, неизвестная пара или незакрытый `{{` делают template невалидным.
-- Если artifact для `content` не является UTF-8, prompt нельзя сформировать и текущая команда завершается fail-fast до запуска агента.
-- Prompt template первого описанного Step не может содержать placeholders любого вида.
-- Workflow show требует source YAML schema с валидными ParameterIds, непустым `steps`, уникальными валидными StepId, структурно валидным Agent либо Process executor, валидными и уникальными значениями `depends-on` и `outputs` и синтаксически валидными Process placeholders, но не разрешает executable и не требует существования referenced Steps, Agents, prompts, parameters или artifacts.
 
 ## Materialized workflow
 

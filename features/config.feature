@@ -131,7 +131,7 @@ Feature: Конфигурация orchestrator
       Then команда завершается с кодом 2
       And config.yaml остался побайтово неизменным
 
-  @cli:config-get-config-set-и-config-list @cli:корень-состояния-и-переменные-окружения @format:workflow-template @process
+  @cli:config-get-config-set-и-config-list @cli:корень-состояния-и-переменные-окружения @process
   Rule: default-workflow ссылается на существующий workflow template
 
     Scenario: Существующий workflow выбирается без materialization

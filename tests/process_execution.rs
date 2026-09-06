@@ -208,11 +208,59 @@ fn run_not_created(world: &mut ProcessWorld) {
     );
 }
 
+fn special_invalid_process(root: &Path, executable: &Path, error: &str) -> Option<String> {
+    match error {
+        "одновременно указан Prompt" => Some(format!(
+            "steps:\n  - id: execute\n    prompt: demo\n    process:\n      executable: {}\n      args: []\n    human: false\n    depends-on: []\n    outputs: []\n",
+            executable.display()
+        )),
+        "executable содержит placeholder" => Some(
+            "parameters:\n  mode: string\nsteps:\n  - id: execute\n    process:\n      executable: '{{param:mode}}'\n      args: []\n    human: false\n    depends-on: []\n    outputs: []\n"
+                .to_owned(),
+        ),
+        "cwd содержит placeholder" => Some(format!(
+            "parameters:\n  mode: string\nsteps:\n  - id: execute\n    process:\n      executable: {}\n      args: []\n      cwd: '{{{{param:mode}}}}'\n    human: false\n    depends-on: []\n    outputs: []\n",
+            executable.display()
+        )),
+        "stdout ссылается на неизвестный output" => Some(format!(
+            "steps:\n  - id: execute\n    process:\n      executable: {}\n      args: []\n      stdout: missing\n    human: false\n    depends-on: []\n    outputs: []\n",
+            executable.display()
+        )),
+        "executable не является executable regular file" => {
+            let path = root.join("not-executable");
+            fs::write(&path, "plain").expect("non-executable file must be written");
+            Some(format!(
+                "steps:\n  - id: execute\n    process:\n      executable: {}\n      args: []\n    human: false\n    depends-on: []\n    outputs: []\n",
+                path.display()
+            ))
+        }
+        "cwd не является directory" => {
+            let path = root.join("cwd-file");
+            fs::write(&path, "plain").expect("cwd file must be written");
+            Some(format!(
+                "steps:\n  - id: execute\n    process:\n      executable: {}\n      args: []\n      cwd: {}\n    human: false\n    depends-on: []\n    outputs: []\n",
+                executable.display(),
+                path.display()
+            ))
+        }
+        _ => None,
+    }
+}
+
 #[given(regex = r"^подготовлен Process Step с ошибкой (.+)$")]
 #[allow(clippy::needless_pass_by_value)]
 fn invalid_process(world: &mut ProcessWorld, error: String) {
     let root = prepare_root(world);
     let executable = executable(root, "process.sh", "#!/bin/sh\nexit 0\n");
+    fs::write(
+        root.join("config.yaml"),
+        "agents:\n  main:\n    type: codex\n    model: model\n    reasoning: high\n",
+    )
+    .expect("config must be written");
+    if let Some(workflow) = special_invalid_process(root, &executable, &error) {
+        fs::write(root.join("workflow/delivery.yaml"), workflow).expect("workflow must be written");
+        return;
+    }
     let (parameters, agent, human, args, dependency, outputs, source) = match error.as_str() {
         "одновременно указан Agent" => (
             "",
@@ -284,11 +332,6 @@ fn invalid_process(world: &mut ProcessWorld, error: String) {
         other => panic!("unknown process error: {other}"),
     };
     fs::write(
-        root.join("config.yaml"),
-        "agents:\n  main:\n    type: codex\n    model: model\n    reasoning: high\n",
-    )
-    .expect("config must be written");
-    fs::write(
         root.join("workflow/delivery.yaml"),
         format!(
             "{parameters}steps:\n{source}  - id: execute\n{agent}    process:\n      executable: {}\n      args: {args}\n    human: {human}\n    depends-on: {dependency}\n    outputs: {outputs}\n",
@@ -320,7 +363,7 @@ fn validate_api(world: &mut ProcessWorld) {
 
 #[then("validation отклоняет Process Step")]
 fn validation_rejects(world: &mut ProcessWorld) {
-    assert_eq!(world.observed().code, 3);
+    assert_eq!(world.observed().code, 3, "{}", world.observed().stderr);
     assert!(world.observed().stdout.is_empty());
 }
 
@@ -334,12 +377,33 @@ fn source_process_workflow(world: &mut ProcessWorld) {
     .expect("workflow must be written");
 }
 
+#[given("подготовлен source Process workflow с relative cwd и executable")]
+fn source_process_workflow_with_relative_paths(world: &mut ProcessWorld) {
+    let root = prepare_root(world);
+    let tools = root.join("tools");
+    fs::create_dir(&tools).expect("tools directory must be created");
+    executable(&tools, "runner.sh", "#!/bin/sh\nexit 0\n");
+    fs::write(
+        root.join("workflow/delivery.yaml"),
+        "steps:\n  - id: execute\n    process:\n      executable: ./runner.sh\n      args: []\n      cwd: tools\n    human: false\n    depends-on: []\n    outputs: []\n",
+    )
+    .expect("workflow must be written");
+}
+
 #[when("Process workflow читается и планируется через публичный API")]
 fn inspect_process_workflow(world: &mut ProcessWorld) {
     world.source =
         Some(show_workflow("delivery", &environment(world.root())).expect("source must load"));
     world.plan =
         Some(build_workflow_plan("delivery", &environment(world.root())).expect("plan must build"));
+}
+
+#[when("Process workflow планируется через публичный API")]
+fn plan_process_workflow(world: &mut ProcessWorld) {
+    world.plan = Some(
+        build_workflow_plan("delivery", &environment(world.root()))
+            .expect("Process plan must build"),
+    );
 }
 
 #[then("source Process сохраняет executable и argv")]
@@ -360,6 +424,16 @@ fn plan_has_materialized_process(world: &mut ProcessWorld) {
     assert!(Path::new(process.executable()).is_absolute());
     assert!(Path::new(process.cwd()).is_absolute());
     assert_eq!(process.args(), ["{{param:mode}}"]);
+}
+
+#[then("plan содержит canonical cwd и executable из него")]
+fn plan_has_canonical_relative_process_paths(world: &mut ProcessWorld) {
+    let plan = world.plan.as_ref().expect("plan must exist");
+    let process = plan.steps()[0].process().expect("Process must exist");
+    let tools = fs::canonicalize(world.root().join("tools"))
+        .expect("tools directory must be canonicalizable");
+    assert_eq!(Path::new(process.cwd()), tools);
+    assert_eq!(Path::new(process.executable()), tools.join("runner.sh"));
 }
 
 #[given("подготовлен Process Step завершающийся успешно со второго запуска")]

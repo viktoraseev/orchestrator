@@ -1,7 +1,7 @@
 Feature: Исполнение произвольных процессов в workflow graph
   Process executor — materialized executable, cwd, argv и optional stdout output обычного non-human Step; он не является Agent type, не имеет native session или control context и завершает attempt только через проверенный exit и supervisor-owned artifact commit.
 
-  @format:workflow-template @cli:start @cli:сигналы-и-закрытие-терминала @cli:вывод-команд
+  @cli:start @cli:сигналы-и-закрытие-терминала @cli:вывод-команд
   Rule: Process получает materialized argv, environment и non-interactive process boundary
     Step executor является ровно одним Agent или Process; Process запускает materialized executable с argv, не является Agent type и не участвует в native session protocol.
     Объявленный строковый run parameter проверяется до резервирования run, сохраняется в materialized workflow и имеет одно неизменное durable значение в argv каждого Process attempt.
@@ -37,15 +37,22 @@ Feature: Исполнение произвольных процессов в wor
         | повторяющийся parameter          | 2    |
         | parameter без разделителя equals | 2    |
 
-  @format:workflow-template
   Rule: Process schema и placeholders проверяются до создания run
-    Validation проверяет ParameterIds, Process executable, cwd, args, stdout и все ссылки Process placeholders до резервирования run.
+    Process Step запрещает `agent`, `prompt` и `human: true`; Process mapping содержит только обязательные строковый `executable` и sequence строк `args`, optional строковый `cwd` и optional `stdout`, который ссылается на InputId из `outputs`.
+    `executable` и `cwd` не содержат placeholders: absolute executable используется напрямую, path с `/` разрешается относительно materialized cwd, bare name ищется в PATH, absent или relative cwd разрешается относительно current working directory, а итоговые executable regular file и directory сохраняются absolute.
+    Каждый Process argv element является literal без NUL либо целиком одним `{{param:…}}`, `{{path:…}}` или `{{output:…}}`; validation проверяет ParameterIds и все ссылки до резервирования run, а content placeholder запрещён.
 
     Scenario: Workflow tools сохраняют source Process и показывают materialized executor
       Given подготовлен source Process workflow с parameter mode
       When Process workflow читается и планируется через публичный API
       Then source Process сохраняет executable и argv
       And plan содержит absolute executable cwd и parameter declaration
+      And run не создан
+
+    Scenario: Relative cwd и executable materialize относительно current working directory
+      Given подготовлен source Process workflow с relative cwd и executable
+      When Process workflow планируется через публичный API
+      Then plan содержит canonical cwd и executable из него
       And run не создан
 
     Scenario Outline: Невалидный Process Step отклоняется preflight
@@ -57,7 +64,13 @@ Feature: Исполнение произвольных процессов в wor
       Examples:
         | error                                                   |
         | одновременно указан Agent                               |
+        | одновременно указан Prompt                              |
         | установлен human                                        |
+        | executable содержит placeholder                         |
+        | cwd содержит placeholder                                |
+        | stdout ссылается на неизвестный output                  |
+        | executable не является executable regular file         |
+        | cwd не является directory                               |
         | content placeholder {{content:source:data}}              |
         | placeholder prefix-{{param:mode}} является частью argv   |
         | parameter placeholder {{param:missing}} неизвестен       |

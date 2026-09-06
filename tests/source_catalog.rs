@@ -152,6 +152,15 @@ fn selected_prompt_without_newline(world: &mut CatalogWorld) {
     fs::write(directory.join("broken.md"), [0xff]).expect("neighbor must be written");
 }
 
+#[given("подготовлен prompt demo с YAML-похожим Markdown")]
+fn yaml_like_prompt(world: &mut CatalogWorld) {
+    empty_root(world);
+    let directory = world.root().join("prompt");
+    fs::create_dir(&directory).expect("prompt directory must be created");
+    fs::write(directory.join("demo.md"), "title: value\n- raw item")
+        .expect("YAML-like prompt must be written");
+}
+
 #[given("подготовлен prompt demo с финальным newline")]
 fn selected_prompt_with_newline(world: &mut CatalogWorld) {
     empty_root(world);
@@ -497,6 +506,15 @@ fn typed_prompt_show(world: &mut CatalogWorld) {
     assert_eq!(prompt.content(), "точный prompt");
     assert_eq!(prompt.bytes(), 19);
     assert!(Path::new(prompt.path()).is_absolute());
+}
+
+#[then("typed prompt show содержит точный YAML-похожий Markdown")]
+fn typed_prompt_show_keeps_yaml_like_markdown(world: &mut CatalogWorld) {
+    let prompt = world
+        .shown_prompt
+        .as_ref()
+        .expect("prompt show must succeed");
+    assert_eq!(prompt.content(), "title: value\n- raw item");
 }
 
 #[then("prompt show stdout побайтово равен template без newline")]

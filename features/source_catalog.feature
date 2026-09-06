@@ -80,8 +80,9 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @format:prompt-template @format:идентификаторы-и-номера @cli:source-catalogs
+  @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Prompt catalog полностью читает UTF-8 templates
+    Prompt catalog читает каждый regular `.md` contract file как произвольный UTF-8 Markdown без YAML-декодирования и считает точное число bytes; non-UTF-8 template делает весь catalog невалидным до вывода.
 
     Scenario: Typed prompt catalog считает UTF-8 bytes
       Given подготовлен prompt template unicode с содержимым Привет
@@ -135,7 +136,7 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @format:workflow-yaml @format:идентификаторы-и-номера @cli:source-catalogs
+  @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Workflow show читает source structure без materialization
     Workflow show выбирает ровно один source template, проверяет его структурную schema и symbolic IDs, сохраняет исходный порядок Steps и source references, но не читает config или prompts, не применяет defaults и не проверяет существование references либо graph reachability.
 
@@ -226,8 +227,14 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 4
       And catalog output пуст
 
-  @format:prompt-template @format:идентификаторы-и-номера @cli:source-catalogs
+  @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Prompt show читает только выбранный template и сохраняет точные bytes
+    Prompt show возвращает выбранный arbitrary UTF-8 Markdown побайтово, не применяя YAML-декодирование и не добавляя финальный newline.
+
+    Scenario: YAML-похожий Markdown остаётся неразобранным текстом
+      Given подготовлен prompt demo с YAML-похожим Markdown
+      When prompt demo читается через публичный API
+      Then typed prompt show содержит точный YAML-похожий Markdown
 
     Scenario: Typed prompt show возвращает content и размер выбранного template
       Given подготовлен prompt demo без финального newline и повреждённый соседний template

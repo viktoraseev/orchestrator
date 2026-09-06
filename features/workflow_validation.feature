@@ -1,7 +1,7 @@
 Feature: Validation workflow
   Validate и preflight start полностью materialize и проверяют только выбранный workflow в памяти; validate не создаёт run, а start публикует snapshot лишь после успешного резервирования RunId.
 
-  @cli:validate @format:workflow-template @format:prompt-template
+  @cli:validate
   Rule: Явно выбранный workflow полностью проверяется в памяти
     Validation допускает cycles с bootstrap первого Step, outputs без consumers и graph без terminal Step; runtime использует уже validated materialized workflow и не пересчитывает статическую reachability.
 
@@ -19,8 +19,9 @@ Feature: Validation workflow
         | output без consumers                           |
         | выбранный workflow с невалидными невыбранными файлами |
 
-  @format:workflow-template
   Rule: Структура workflow проверяется до ссылок и graph
+    Source workflow является YAML mapping с optional `parameters` и обязательной непустой ordered sequence `steps`; parameters сопоставляет уникальные ParameterIds единственному type `string`, а каждый Step содержит только `id`, optional `agent`, optional `prompt`, optional `process`, обязательные `human`, `depends-on` и `outputs`.
+    StepIds уникальны, `depends-on` и `outputs` являются sequences уникальных symbolic IDs и могут быть пустыми; duplicate mapping keys, неизвестные поля и нарушения типов отклоняются до проверки ссылок.
 
     Scenario Outline: Невалидная структура workflow отклоняется
       Given подготовлен кандидат workflow "<candidate>"
@@ -40,6 +41,10 @@ Feature: Validation workflow
         | невалидный ParameterId с точкой   | не соответствует kebab-case |
         | невалидный InputId с точкой       | не соответствует kebab-case |
         | невалидный PromptId с точкой      | не соответствует kebab-case |
+        | parameters не mapping             | invalid type            |
+        | неподдерживаемый type parameter   | неподдерживаемый type   |
+        | steps не sequence                 | invalid type            |
+        | повторяющийся root key            | duplicate field         |
         | синтаксически невалидный YAML      | невалидный workflow     |
 
   @format:config-yaml
@@ -60,9 +65,9 @@ Feature: Validation workflow
         | Agent type без native resume      | native resume       |
         | невалидный config                 | невалидный config   |
 
-  @format:prompt-template
   Rule: Prompt placeholders ссылаются только на input mapping Step
-    Каждый PromptId существует; первый описанный Step не содержит placeholders, а placeholder остальных Steps ссылается только на Step из `depends-on` и объявленный InputId из outputs этого source Step.
+    Prompt template — произвольный UTF-8 Markdown без YAML-декодирования; `{{path:<step-id>:<input-id>}}` подставляет absolute artifact path, а `{{content:<step-id>:<input-id>}}` — точный UTF-8 content без дополнительного экранирования.
+    Каждый PromptId существует; placeholders не содержат пробелы, первый описанный Step не содержит placeholders, а placeholder остальных Steps ссылается только на Step из `depends-on` и объявленный InputId из outputs этого source Step; неизвестный вид, неизвестная пара и незакрытый placeholder невалидны.
 
     Scenario Outline: Невалидный prompt отклоняется
       Given подготовлен кандидат workflow "<candidate>"

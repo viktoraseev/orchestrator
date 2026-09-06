@@ -1,5 +1,5 @@
 Feature: Восстановление durable run
-  Resume проверяет полную durable-модель до запуска Agent и сохраняет crash leftovers вне модели.
+  Resume после получения Run lock проверяет все опубликованные attempts, выводит их состояние без отдельной state-записи или обязательного output-маркера и только затем продолжает unfinished attempts либо создаёт ready activations; crash leftovers остаются вне модели.
 
   @format:agent-attempt-record @format:artifact @cli:resume
   Rule: Противоречивая durable-модель отклоняется до побочных эффектов

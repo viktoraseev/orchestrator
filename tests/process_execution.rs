@@ -459,11 +459,20 @@ fn run_completed(world: &mut ProcessWorld) {
     );
 }
 
-#[given("подготовлен Process Step не создающий объявленный output")]
+#[given("подготовлен Process Step создающий только один из двух объявленных outputs")]
 fn missing_output_process(world: &mut ProcessWorld) {
     let root = prepare_root(world);
-    let executable = executable(root, "no-output.sh", "#!/bin/sh\nexit 0\n");
-    write_process_workflow(root, &executable, "[]", "[result]");
+    let executable = executable(
+        root,
+        "partial-output.sh",
+        "#!/bin/sh\nprintf partial > \"$1\"\n",
+    );
+    write_process_workflow(
+        root,
+        &executable,
+        "[\"{{output:result}}\"]",
+        "[result, missing]",
+    );
 }
 
 #[given("подготовлен Process Step создающий directory вместо output")]
@@ -495,6 +504,17 @@ fn stdout_is_artifact(world: &mut ProcessWorld) {
             .expect("artifact must be readable"),
         "stdout bytes"
     );
+}
+
+#[then("Process artifacts не опубликованы")]
+fn process_artifacts_are_not_published(world: &mut ProcessWorld) {
+    let artifacts = fs::read_dir(run_directory(world))
+        .expect("run directory must be readable")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".artifact"))
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    assert!(artifacts.is_empty(), "published artifacts: {artifacts:?}");
 }
 
 #[when("запускается workflow с Process Step")]

@@ -3,7 +3,7 @@ Feature: Durable lifecycle run
 
   @cli:start @format:materialized-workflow @format:agent-attempt-record @spec:сущности @workflow:initial-activation-dependencies-и-frontier
   Rule: Start обещает только durable run
-    Возврат Agent process без принятого completion оставляет attempt незавершённым и завершает команду runtime failure; автоматического повторного запуска или native resume в этой lifecycle-команде нет.
+    После общего preflight start резервирует и блокирует run, durable-публикует проверенный materialized workflow до initial attempt и запускает Agent только после обеих публикаций; возврат Agent process без принятого completion оставляет attempt незавершённым и завершает команду runtime failure без автоматического повторного запуска или native resume в этой lifecycle-команде.
 
     Scenario: Agent возвращает управление без completion
       Given подготовлен single-step workflow без outputs

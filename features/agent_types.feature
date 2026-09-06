@@ -55,7 +55,7 @@ Feature: Встроенные Agent types
       Then lifecycle завершается с кодом 0
       And был запущен default executable claude
 
-  @process @spec:сущности @spec:главный-workflow @cli:корень-состояния-и-переменные-окружения @cli:вывод-команд
+  @process @spec:сущности @cli:корень-состояния-и-переменные-окружения @cli:вывод-команд
   Rule: Codex adapter строит и интерпретирует собственный protocol
     Новая non-human session получает args `exec --json --model model --config model_reasoning_effort="high" <prompt>`, а resume вставляет `resume` и native session ID.
 
@@ -75,7 +75,7 @@ Feature: Встроенные Agent types
       Then lifecycle завершается с кодом 0
       And process Agent получил точные resume args для codex
 
-  @process @spec:сущности @spec:главный-workflow @cli:вывод-команд
+  @process @spec:сущности @cli:вывод-команд
   Rule: Claude adapter строит и интерпретирует собственный protocol
     Новая non-human session получает args `--print --output-format stream-json --verbose --model model --effort high <prompt>`, а resume добавляет `--resume <session-id>` перед prompt.
 
@@ -112,7 +112,7 @@ Feature: Встроенные Agent types
         | codex  |
         | claude |
 
-  @process @spec:сущности @spec:главный-workflow @cli:вывод-команд
+  @process @spec:сущности @cli:вывод-команд
   Rule: Обязательный session event интерпретируется fail-fast
     Codex требует `{"type":"thread.started","thread_id":"<session-id>"}`, а Claude — `{"type":"system","subtype":"init","session_id":"<session-id>"}`; повтор ID идемпотентен, другой ID противоречив, отсутствие события и невалидный JSON ошибочны, неизвестный валидный event игнорируется.
 
@@ -162,7 +162,7 @@ Feature: Встроенные Agent types
         | directory                      |
         | non-executable regular file    |
 
-  @process @spec:сущности @spec:главный-workflow @cli:вывод-команд
+  @process @spec:сущности @cli:вывод-команд
   Rule: Agent session view остаётся volatile
     Codex `item.completed` с `item.type = "agent_message"` и Claude `assistant` с text content blocks обновляют только volatile view; неизвестные валидные events игнорируются.
 

@@ -90,12 +90,14 @@ Feature: Исполнение произвольных процессов в wor
 
     @process
     Scenario: Успешный Process без обязательного output не завершает attempt
-      Given подготовлен Process Step не создающий объявленный output
+      Given подготовлен Process Step создающий только один из двух объявленных outputs
       When запускается workflow с Process Step
       Then команда завершается runtime error и attempt не завершён
+      And Process artifacts не опубликованы
 
     @process
     Scenario: Успешный Process с non-regular output не завершает attempt
       Given подготовлен Process Step создающий directory вместо output
       When запускается workflow с Process Step
       Then команда завершается runtime error и attempt не завершён
+      And Process artifacts не опубликованы

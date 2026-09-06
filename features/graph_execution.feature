@@ -3,6 +3,7 @@ Feature: Выполнение workflow graph
 
   @workflow:initial-activation-dependencies-и-frontier @workflow:inputs-и-prompt @workflow:fail-fast-input-validation @format:agent-attempt-record
   Rule: Линейный target получает зафиксированную версию source artifacts
+    Scheduling создаёт attempt только для ready activation и первой durable-публикацией навсегда фиксирует выбранные source attempts; Agent получает UTF-8 prompt и input mapping с artifact-ключами `(source-step-id, input-id)`.
 
     Scenario: Target получает path, content и durable input source attempt
       Given подготовлен линейный workflow source → target

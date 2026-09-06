@@ -1,9 +1,21 @@
 Feature: Control endpoint активных Agent attempts
   Дочерние control-команды передают события единственному supervisor текущего run и никогда не изменяют durable-файлы напрямую.
 
-  @process @cli:session-activate-и-attempt-complete
-  Rule: Parent принимает control call только для активного inherited context
-    Перед каждым Agent process supervisor передаёт endpoint, RunId и attempt через environment; parent принимает запрос только для обслуживаемого run и активного attempt, а недоступный, чужой или закрытый context возвращает код 5 без изменения durable run.
+  @process
+  Rule: Agent-facing команды используют только активный inherited control context
+    `attempt complete` и `session activate` предназначены для tool calls агента и agent-specific hooks; payload передаётся аргументами, а endpoint, RunId и attempt — только через environment текущего Agent process, поэтому явный control selector является syntax error с кодом 2.
+    Перед каждым Agent process supervisor передаёт endpoint, RunId и attempt через environment; parent принимает запрос только для обслуживаемого run и активного attempt, а недоступный, чужой или закрытый context возвращает код 5 без изменения durable run и никогда не записывает его напрямую.
+
+    Scenario Outline: Control context нельзя выбрать аргументами команды
+      Given подготовлен корень без runs
+      When запускается agent-facing команда "<command>" с явным selector "<selector>"
+      Then lifecycle завершается с кодом 2
+      And lifecycle run не создан
+
+      Examples:
+        | command                         | selector     |
+        | attempt complete                | --run-id 123 |
+        | session activate opaque-session | --attempt 0  |
 
     Scenario: Дочерняя команда публикует completion только через parent supervisor
       Given подготовлен single-step workflow с output result

@@ -14,8 +14,7 @@
 - `orchestrator run verify [<run-id>] [--format text|json]` формирует полный read-only validation report.
 - `orchestrator workflow show <workflow-id> [--format text|json]` показывает структуру выбранного source workflow template.
 - `orchestrator workflow plan <workflow-id> [--format text|json]` показывает полностью materialized execution plan без создания run.
-- `orchestrator attempt complete [--artifact <input-id> <path>]...` передаёт полный текущий кандидат completion и artifacts; attempt завершается только после возврата процесса агента.
-- `orchestrator session activate <session-id>` фиксирует activation внутренней сессии текущего attempt.
+
 ## Выбор workflow
 
 После выбора workflow config всё равно читается для разрешения Agents и `default-agent`.
@@ -25,24 +24,6 @@
 Именованные Agents редактируются непосредственно в config; `config set` не создаёт и не изменяет их конфигурацию.
 
 Config commands не получают run locks и не изменяют существующие runs.
-
-## Agent-facing команды
-
-- `attempt complete` и `session activate` предназначены для tool calls агента и agent-specific hooks.
-- Они получают RunId, номер attempt и адрес parent supervisor только из control context текущего процесса; передать или выбрать их аргументами нельзя.
-- При отсутствующем или устаревшем endpoint либо после того, как parent наблюдал возврат процесса агента, обрабатывавшего attempt, команда завершается с `5` и не пишет в каталог run напрямую.
-
-- `orchestrator attempt complete` принимает ноль или больше повторяющихся `--artifact <input-id> <path>`.
-- Набор InputIds обязан в точности совпадать с `outputs` текущего Step; для пустого `outputs` аргументы `--artifact` не передаются.
-- Каждый `<path>` является переданным агентом абсолютным путём к source-файлу artifact; отдельный временный каталог orchestrator не создаёт и не передаёт, containment пути не проверяется, symbolic links разрешаются операционной системой, а конечный объект обязан быть regular file.
-- Parent сначала проверяет и полностью читает все файлы, затем целиком заменяет ими последний принятый кандидат текущей обработки attempt.
-- Каждый следующий валидный `attempt complete`, принятый пока обработка attempt активна, может передать другие bytes artifacts и снова целиком заменяет предыдущий кандидат.
-- До возврата процесса агента кандидат не завершает attempt и его artifacts не доступны workflow graph; при возврате последний принятый кандидат публикуется по Rule «Completion становится durable только после возврата Agent» в `features/artifact_completion.feature`.
-
-- `orchestrator session activate <session-id>` имеет одинаковый контракт для создания, native resume и fork внутренней сессии: передаётся только ID активированной сессии.
-- Для fork это ID дочерней сессии; вид операции и parent session ID не сохраняются и не влияют на выбор сессии для следующего resume.
-- Повтор ID, равного последней durable activation attempt, является успешным no-op; тот же ID после другой activation добавляется в durable-порядок заново.
-- Пока процесс агента работает, `session activate` принимается независимо от того, вызывал ли он ранее `attempt complete`.
 
 ## Вывод команд
 
@@ -87,10 +68,6 @@ Config commands не получают run locks и не изменяют сущ�
 
 - Ненулевой exit процесса агента не пробрасывается как код CLI и не сохраняется в Agent attempt record: до user shutdown текущая команда завершается с `1`, а во время user shutdown исходный код только показывается в диагностике и не заменяет итоговый код `/exit` `0`.
 - Если одновременно работают несколько executors и supervisor ещё не вошёл в user shutdown, первая зафиксированная runtime error запускает fail-fast shutdown всей команды; в user shutdown возвраты уже работающих процессов не прерывают ожидание остальных.
-
-- Запрос `attempt complete` с отсутствующим, повторяющимся или дополнительным InputId, не абсолютным или несуществующим path либо path, чей конечный объект не является regular file, не изменяет предыдущий кандидат; дочерний tool call завершается с `3`, и агент может исправить запрос.
-- Каждый валидный `attempt complete`, принятый пока обработка attempt активна, завершается с `0`; одинаковый или изменённый повтор заменяет предыдущий кандидат целиком.
-- Отдельной сущности `output` нет, а содержимое artifact обрабатывается по Rule «Attempt complete принимает полный snapshot объявленных outputs» в `features/artifact_completion.feature`.
 
 ## `start`
 

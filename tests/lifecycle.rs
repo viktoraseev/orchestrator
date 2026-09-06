@@ -1484,6 +1484,35 @@ fn process_agent_saves_control_context(world: &mut LifecycleWorld) {
     );
 }
 
+#[when(expr = "запускается agent-facing команда {string} с явным selector {string}")]
+#[allow(clippy::needless_pass_by_value)]
+fn run_agent_facing_command_with_explicit_control_selector(
+    world: &mut LifecycleWorld,
+    command: String,
+    selector: String,
+) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let output = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(command.split_whitespace())
+        .args(selector.split_whitespace())
+        .env("ORC_HOME", root.path())
+        .env_remove("ORC_CONTROL_ENDPOINT")
+        .env_remove("ORC_RUN_ID")
+        .env_remove("ORC_ATTEMPT")
+        .output()
+        .expect("agent-facing command must run");
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines: String::from_utf8(output.stdout)
+            .expect("stdout must be UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
 #[given("подготовлен process Agent блокирующийся после сохранения control context")]
 fn process_agent_blocks_after_saving_control_context(world: &mut LifecycleWorld) {
     workflow_without_outputs(world);

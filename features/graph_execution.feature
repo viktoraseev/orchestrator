@@ -78,7 +78,7 @@ Feature: Выполнение workflow graph
       Then lifecycle завершается с кодом 1
       And stderr сообщает blocked и отсутствующие source Steps c, b
 
-  @workflow:планирование @spec:control-endpoint-и-события @spec:блокировка-run @cli:коды-завершения
+  @workflow:планирование @spec:блокировка-run @cli:коды-завершения
   Rule: Non-human attempts выполняются параллельно под общим лимитом
 
     Scenario: Независимые ветви одновременно занимают два разрешённых slot
@@ -94,11 +94,3 @@ Feature: Выполнение workflow graph
       When левая ветвь fail-fast завершается с ошибкой
       Then lifecycle завершается с кодом 1
       And успешная правая ветвь durable завершена, а join не создан
-
-    @process @cli:сигналы-и-закрытие-терминала
-    Scenario: Process fail-fast посылает SIGTERM соседней process group через общий supervisor
-      Given подготовлен diamond workflow с общим лимитом 2
-      And process branch Agents настроены для fail-fast
-      When process fail-fast освобождает заблокированную соседнюю ветвь
-      Then lifecycle завершается с кодом 1
-      And обе process ветви использовали один endpoint и правая получила SIGTERM

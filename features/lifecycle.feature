@@ -54,7 +54,7 @@ Feature: Durable lifecycle run
       Then lifecycle завершается с кодом 4
       And каталог неизвестного run не создан
 
-  @cli:resume @format:agent-attempt-record @spec:control-endpoint-и-события
+  @cli:resume @format:agent-attempt-record
   Rule: Session activation сохраняется в durable-порядке
     Явный resume продолжает тот же attempt с последней Agent session activation в durable-порядке независимо от create, resume или fork; без activation Agent type создаёт новую внутреннюю session для того же attempt и номера.
 
@@ -152,13 +152,3 @@ Feature: Durable lifecycle run
       Then lifecycle завершается с кодом 0
       And Agent не запускается повторно
       And lifecycle сообщает already completed
-
-    @process
-    Scenario: Process Agent завершает attempt дочерней CLI-командой
-      Given подготовлен single-step workflow с output result
-      And process Agent публикует artifact final через attempt complete
-      When запускается orchestrator start delivery
-      Then lifecycle завершается с кодом 0
-      And дочерний orchestrator использовал унаследованные ORC_HOME, ORC_CONTROL_ENDPOINT, ORC_RUN_ID и ORC_ATTEMPT
-      And durable artifact result содержит bytes final
-      And lifecycle сообщает о завершении run

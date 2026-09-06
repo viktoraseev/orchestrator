@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -34,6 +34,52 @@ struct LifecycleWorld {
     agent_type: Option<String>,
     protocol_case: Option<String>,
     start_window_ms: Option<(u128, u128)>,
+    control_endpoint_observation: Option<(PathBuf, bool, u32)>,
+    stale_control_endpoint: Option<PathBuf>,
+    new_control_endpoint: Option<PathBuf>,
+    stale_endpoint_existed: bool,
+}
+
+struct ProcessTreeGuard {
+    child: Option<Child>,
+    agent_pid_path: PathBuf,
+}
+
+impl ProcessTreeGuard {
+    fn new(child: Child, agent_pid_path: PathBuf) -> Self {
+        Self {
+            child: Some(child),
+            agent_pid_path,
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.as_ref().expect("child must be running").id()
+    }
+
+    fn wait_with_output(&mut self) -> std::process::Output {
+        self.child
+            .take()
+            .expect("child must be running")
+            .wait_with_output()
+            .expect("orchestrator must exit")
+    }
+}
+
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        if let Ok(agent_pid) = fs::read_to_string(&self.agent_pid_path) {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", agent_pid.trim()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[given(expr = "подготовлен single-step workflow для Agent type {word}")]
@@ -571,6 +617,7 @@ enum Behavior {
     Activate(Vec<String>),
     Complete { input_id: String, bytes: Vec<u8> },
     CompleteTwice,
+    CompleteActivateComplete,
     CompleteThenInvalid,
     CompleteWithExit(i32),
     CompleteEmpty,
@@ -657,6 +704,14 @@ impl AgentRegistry for FakeAgentRegistry {
                 let source = self.root.join("source-artifact");
                 fs::write(&source, b"draft").map_err(|error| error.to_string())?;
                 control.complete(&[("result".to_owned(), source.clone())])?;
+                fs::write(&source, b"final").map_err(|error| error.to_string())?;
+                control.complete(&[("result".to_owned(), source)])?;
+            }
+            Behavior::CompleteActivateComplete => {
+                let source = self.root.join("source-artifact");
+                fs::write(&source, b"draft").map_err(|error| error.to_string())?;
+                control.complete(&[("result".to_owned(), source.clone())])?;
+                control.activate_session("late-session")?;
                 fs::write(&source, b"final").map_err(|error| error.to_string())?;
                 control.complete(&[("result".to_owned(), source)])?;
             }
@@ -1097,6 +1152,50 @@ fn process_agent_with_completion(world: &mut LifecycleWorld) {
     );
 }
 
+#[given(expr = "process Agent отправляет completion с чужим control context {string}")]
+#[allow(clippy::needless_pass_by_value)]
+fn process_agent_with_foreign_control_context(world: &mut LifecycleWorld, context: String) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    world.control_code = Some(root.path().join("control-code"));
+    let environment = match context.as_str() {
+        "RunId" => "ORC_RUN_ID=999999",
+        "attempt" => "ORC_ATTEMPT=999999",
+        other => panic!("unknown foreign control context: {other}"),
+    };
+    prepare_process_agent(
+        world,
+        &format!(
+            "#!/bin/sh\nprintf final > \"$ORC_TEST_ARTIFACT\"\n{environment} \"$ORC_TEST_ORCHESTRATOR\" attempt complete --artifact result \"$ORC_TEST_ARTIFACT\"\nprintf %s $? > \"$ORC_TEST_CONTROL_CODE\"\n"
+        ),
+    );
+}
+
+#[given("process Agent сохраняет control context и возвращается")]
+fn process_agent_saves_control_context(world: &mut LifecycleWorld) {
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\nprintf '%s' \"$ORC_CONTROL_ENDPOINT\" > \"$ORC_HOME/saved.endpoint\"\nprintf '%s' \"$ORC_RUN_ID\" > \"$ORC_HOME/saved.run-id\"\nprintf '%s' \"$ORC_ATTEMPT\" > \"$ORC_HOME/saved.attempt\"\n",
+    );
+}
+
+#[given("подготовлен process Agent блокирующийся после сохранения control context")]
+fn process_agent_blocks_after_saving_control_context(world: &mut LifecycleWorld) {
+    workflow_without_outputs(world);
+    let root = world.root.as_ref().expect("scenario must define root");
+    let gate = root.path().join("crash-gate");
+    let status = Command::new("mkfifo")
+        .arg(&gate)
+        .status()
+        .expect("mkfifo must run");
+    assert!(status.success());
+    world.process_gate = Some(gate);
+    world.process_ready = Some(root.path().join("crash-ready"));
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\nprintf '%s' \"$$\" > \"$ORC_HOME/crash-agent.pid\"\nprintf '%s' \"$ORC_CONTROL_ENDPOINT\" > \"$ORC_HOME/stale.endpoint\"\nprintf '%s' \"$ORC_RUN_ID\" > \"$ORC_HOME/saved.run-id\"\n: > \"$ORC_TEST_READY\"\nIFS= read -r ignored < \"$ORC_TEST_GATE\"\n",
+    );
+}
+
 #[then(
     "дочерний orchestrator использовал унаследованные ORC_HOME, ORC_CONTROL_ENDPOINT, ORC_RUN_ID и ORC_ATTEMPT"
 )]
@@ -1324,6 +1423,13 @@ fn replace_completion_candidate(world: &mut LifecycleWorld) {
     run_start(world, [Behavior::CompleteTwice]);
 }
 
+#[when(
+    "Agent передаёт completion draft, активирует session late-session, передаёт completion final и возвращается"
+)]
+fn replace_completion_after_session_activation(world: &mut LifecycleWorld) {
+    run_start(world, [Behavior::CompleteActivateComplete]);
+}
+
 #[when("Agent передаёт валидный completion good, затем невалидный extra и возвращает управление")]
 fn invalid_completion_keeps_candidate(world: &mut LifecycleWorld) {
     run_start(world, [Behavior::CompleteThenInvalid]);
@@ -1379,23 +1485,39 @@ fn fail_parallel_diamond(world: &mut LifecycleWorld) {
 
 #[when("process fail-fast освобождает заблокированную соседнюю ветвь")]
 fn process_fail_fast_releases_sibling(world: &mut LifecycleWorld) {
-    let root = world.root.as_ref().expect("scenario must define root");
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    let root = world
+        .root
+        .as_ref()
+        .expect("scenario must define root")
+        .path()
+        .to_owned();
     let agent = world
         .process_agent
         .as_ref()
         .expect("scenario must define process Agent");
     let child = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
         .args(["start", "delivery"])
-        .env("ORC_HOME", root.path())
+        .env("ORC_HOME", &root)
         .env("ORC_AGENT_COMMAND", agent)
         .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("orchestrator must start");
-    wait_for_path(&root.path().join("left.ready"));
-    wait_for_path(&root.path().join("right.ready"));
-    fs::write(root.path().join("left.gate"), b"fail\n").expect("left Agent must be released");
+    wait_for_path(&root.join("left.ready"));
+    wait_for_path(&root.join("right.ready"));
+    let endpoint = PathBuf::from(
+        fs::read_to_string(root.join("left.endpoint")).expect("control endpoint must be readable"),
+    );
+    let metadata = fs::metadata(&endpoint).expect("active control endpoint must exist");
+    world.control_endpoint_observation = Some((
+        endpoint,
+        metadata.file_type().is_socket(),
+        metadata.permissions().mode() & 0o777,
+    ));
+    fs::write(root.join("left.gate"), b"fail\n").expect("left Agent must be released");
     let output = child.wait_with_output().expect("orchestrator must exit");
     let lines: Vec<String> = String::from_utf8(output.stdout)
         .expect("stdout must be UTF-8")
@@ -1636,6 +1758,107 @@ fn start_through_process(world: &mut LifecycleWorld) {
         lines,
         error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
     });
+}
+
+#[when("дочерняя session activate вызывается после завершения supervisor")]
+fn activate_session_after_supervisor_exit(world: &mut LifecycleWorld) {
+    start_through_process(world);
+    assert_eq!(
+        world.observed().exit_code,
+        1,
+        "{:?}",
+        world.observed().error
+    );
+    world.durable_snapshot = durable_snapshot(world);
+    let root = world.root.as_ref().expect("scenario must define root");
+    let endpoint = PathBuf::from(
+        fs::read_to_string(root.path().join("saved.endpoint"))
+            .expect("saved endpoint must be readable"),
+    );
+    let run_id =
+        fs::read_to_string(root.path().join("saved.run-id")).expect("saved RunId must be readable");
+    let attempt = fs::read_to_string(root.path().join("saved.attempt"))
+        .expect("saved attempt must be readable");
+    let output = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["session", "activate", "late-session"])
+        .env("ORC_HOME", root.path())
+        .env("ORC_CONTROL_ENDPOINT", &endpoint)
+        .env("ORC_RUN_ID", run_id)
+        .env("ORC_ATTEMPT", attempt)
+        .output()
+        .expect("child session activate must run");
+    world.stale_control_endpoint = Some(endpoint);
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines: String::from_utf8(output.stdout)
+            .expect("stdout must be UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
+#[when("supervisor завершается SIGKILL и run продолжается новым supervisor")]
+fn resume_after_supervisor_sigkill(world: &mut LifecycleWorld) {
+    let root = world
+        .root
+        .as_ref()
+        .expect("scenario must define root")
+        .path()
+        .to_owned();
+    let agent = world
+        .process_agent
+        .as_ref()
+        .expect("scenario must define process Agent");
+    let gate = world
+        .process_gate
+        .as_ref()
+        .expect("scenario must define process gate");
+    let ready = world
+        .process_ready
+        .as_ref()
+        .expect("scenario must define ready marker");
+    let child = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["start", "delivery"])
+        .env("ORC_HOME", &root)
+        .env("ORC_AGENT_COMMAND", agent)
+        .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
+        .env("ORC_TEST_GATE", gate)
+        .env("ORC_TEST_READY", ready)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("orchestrator must start");
+    let mut processes = ProcessTreeGuard::new(child, root.join("crash-agent.pid"));
+    wait_for_path(ready);
+    let old_endpoint = PathBuf::from(
+        fs::read_to_string(root.join("stale.endpoint"))
+            .expect("stale endpoint path must be readable"),
+    );
+    let run_id =
+        fs::read_to_string(root.join("saved.run-id")).expect("saved RunId must be readable");
+    let agent_pid =
+        fs::read_to_string(root.join("crash-agent.pid")).expect("Agent pid must be readable");
+    send_signal(processes.id(), "KILL");
+    send_signal(
+        agent_pid.trim().parse().expect("Agent pid must be numeric"),
+        "KILL",
+    );
+    let first_output = processes.wait_with_output();
+    assert!(first_output.status.code().is_none());
+    world.run_id = Some(run_id);
+    world.stale_endpoint_existed = old_endpoint.exists();
+    world.stale_control_endpoint = Some(old_endpoint);
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\nprintf '%s' \"$ORC_CONTROL_ENDPOINT\" > \"$ORC_HOME/new.endpoint\"\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n",
+    );
+    resume_through_process(world);
+    world.new_control_endpoint = Some(PathBuf::from(
+        fs::read_to_string(root.join("new.endpoint")).expect("new endpoint path must be readable"),
+    ));
 }
 
 fn resume_through_process(world: &mut LifecycleWorld) {
@@ -2099,6 +2322,19 @@ fn artifact_has_final_bytes(world: &mut LifecycleWorld) {
     );
 }
 
+#[then("durable attempt содержит late-session перед completed")]
+fn durable_attempt_contains_late_session_before_completion(world: &mut LifecycleWorld) {
+    let record = fs::read_to_string(run_directory(world).join("0.first.attempt.yaml"))
+        .expect("attempt record must be readable");
+    let session = record
+        .find("session-id: late-session")
+        .expect("late session must be durable");
+    let completed = record
+        .find("type: completed")
+        .expect("completed must be durable");
+    assert!(session < completed);
+}
+
 #[then("durable artifact result содержит bytes good")]
 fn artifact_has_good_bytes(world: &mut LifecycleWorld) {
     assert_eq!(
@@ -2118,6 +2354,27 @@ fn child_completion_exit_code(world: &mut LifecycleWorld) {
         fs::read_to_string(path).expect("control code must be readable"),
         "3"
     );
+}
+
+#[then("дочерний control call завершился с кодом 5")]
+fn child_control_call_is_rejected(world: &mut LifecycleWorld) {
+    let path = world
+        .control_code
+        .as_ref()
+        .expect("scenario must define control code path");
+    assert_eq!(
+        fs::read_to_string(path).expect("control code must be readable"),
+        "5"
+    );
+}
+
+#[then("чужой completion не добавил completed или artifact")]
+fn foreign_completion_does_not_change_attempt(world: &mut LifecycleWorld) {
+    let directory = run_directory(world);
+    let record = fs::read_to_string(directory.join("0.first.attempt.yaml"))
+        .expect("attempt record must be readable");
+    assert!(!record.contains("completed"));
+    assert!(!directory.join("0.first.result.artifact").exists());
 }
 
 #[then("target attempt 1 имеет input 0")]
@@ -2420,6 +2677,52 @@ fn process_branches_share_endpoint_and_cancel(world: &mut LifecycleWorld) {
     assert!(!left.is_empty());
     assert_eq!(left, right);
     assert!(root.path().join("right.terminated").is_file());
+}
+
+#[then("общий endpoint был Unix socket с правами 600 и удалён после supervisor")]
+fn shared_endpoint_is_protected_and_removed(world: &mut LifecycleWorld) {
+    let (path, was_socket, mode) = world
+        .control_endpoint_observation
+        .as_ref()
+        .expect("scenario must observe control endpoint");
+    assert!(*was_socket);
+    assert_eq!(*mode, 0o600);
+    assert!(!path.exists());
+}
+
+#[then("закрытый control endpoint удалён")]
+fn closed_control_endpoint_is_removed(world: &mut LifecycleWorld) {
+    let endpoint = world
+        .stale_control_endpoint
+        .as_ref()
+        .expect("scenario must save control endpoint");
+    assert!(!endpoint.exists());
+}
+
+#[then("stale endpoint существовал после crash, но удалён при resume")]
+fn stale_endpoint_is_removed_on_resume(world: &mut LifecycleWorld) {
+    assert!(world.stale_endpoint_existed);
+    assert!(
+        !world
+            .stale_control_endpoint
+            .as_ref()
+            .expect("scenario must save stale endpoint")
+            .exists()
+    );
+}
+
+#[then("новый endpoint отличается от stale и удалён после supervisor")]
+fn resumed_supervisor_uses_new_endpoint(world: &mut LifecycleWorld) {
+    let stale = world
+        .stale_control_endpoint
+        .as_ref()
+        .expect("scenario must save stale endpoint");
+    let new = world
+        .new_control_endpoint
+        .as_ref()
+        .expect("scenario must save new endpoint");
+    assert_ne!(stale, new);
+    assert!(!new.exists());
 }
 
 #[then("attempt завершён terminal event completed")]
@@ -2847,6 +3150,7 @@ impl LifecycleWorld {
 #[tokio::main]
 async fn main() {
     LifecycleWorld::run("features/lifecycle.feature").await;
+    LifecycleWorld::run("features/control_endpoint.feature").await;
     LifecycleWorld::run("features/graph_execution.feature").await;
     LifecycleWorld::run("features/recovery.feature").await;
     LifecycleWorld::run("features/human_execution.feature").await;

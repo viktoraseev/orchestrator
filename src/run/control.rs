@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -181,17 +182,17 @@ pub(super) struct ControlServer {
 }
 
 impl ControlServer {
-    pub(super) fn start(_directory: &Path, hub: Arc<ControlHub>) -> Result<Self, CommandError> {
+    pub(super) fn start(directory: &Path, hub: Arc<ControlHub>) -> Result<Self, CommandError> {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let socket_root = if Path::new("/private/tmp").is_dir() {
             Path::new("/private/tmp")
         } else {
             Path::new("/tmp")
         };
-        let path = socket_root.join(format!(
-            "orc-control-{}-{sequence}.sock",
-            std::process::id()
-        ));
+        let namespace = control_namespace(directory);
+        let prefix = format!("orc-control-{namespace:016x}-");
+        remove_stale_endpoints(socket_root, &prefix)?;
+        let path = socket_root.join(format!("{prefix}{}-{sequence}.sock", std::process::id()));
         let listener = UnixListener::bind(&path).map_err(|source| {
             runtime(
                 "run",
@@ -242,6 +243,58 @@ impl ControlServer {
         result?;
         remove_result
     }
+}
+
+fn control_namespace(directory: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    directory.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn remove_stale_endpoints(socket_root: &Path, prefix: &str) -> Result<(), CommandError> {
+    let entries = fs::read_dir(socket_root).map_err(|source| {
+        runtime(
+            "run",
+            format!(
+                "не удалось проверить stale control endpoints в {}",
+                socket_root.display()
+            ),
+            source,
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| {
+            runtime(
+                "run",
+                format!(
+                    "не удалось прочитать stale control endpoint в {}",
+                    socket_root.display()
+                ),
+                source,
+            )
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(prefix)
+            && Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sock"))
+        {
+            fs::remove_file(entry.path()).map_err(|source| {
+                runtime(
+                    "run",
+                    format!(
+                        "не удалось удалить stale control endpoint {}",
+                        entry.path().display()
+                    ),
+                    source,
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::needless_pass_by_value)]

@@ -75,7 +75,7 @@ Feature: Встроенные Agent types
       Then lifecycle завершается с кодом 0
       And process Agent получил точные resume args для codex
 
-  @process @spec:сущности @spec:control-endpoint-и-события @spec:главный-workflow @cli:вывод-команд
+  @process @spec:сущности @spec:главный-workflow @cli:вывод-команд
   Rule: Claude adapter строит и интерпретирует собственный protocol
     Новая non-human session получает args `--print --output-format stream-json --verbose --model model --effort high <prompt>`, а resume добавляет `--resume <session-id>` перед prompt.
 

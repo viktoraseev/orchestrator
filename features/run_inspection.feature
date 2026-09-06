@@ -1,6 +1,6 @@
 Feature: Read-only inspection durable runs
 
-  @format:корень-состояния-и-layout @cli:read-only-run-inspection
+  @cli:read-only-run-inspection
   Rule: Run inspection читает согласованный snapshot
 
     Read-only inspection загружает materialized workflow, attempts и artifacts через ту же validation boundary, что resume.
@@ -13,7 +13,7 @@ Feature: Read-only inspection durable runs
       And typed inspection snapshot отсутствует
       And inspection не изменил durable state
 
-  @format:корень-состояния-и-layout @cli:read-only-run-inspection
+  @cli:read-only-run-inspection
   Rule: Run list вычисляет состояние без побочных эффектов
 
     Scenario: Пустой корень даёт пустой список
@@ -93,7 +93,7 @@ Feature: Read-only inspection durable runs
       Then inspection завершается с кодом 4
       And inspection output пуст
 
-  @format:идентификаторы-и-номера @cli:read-only-run-inspection
+  @cli:read-only-run-inspection
   Rule: Run artifact выбирает точную durable версию
     Выбранный artifact доступен только у completed attempt и отдаётся как точные bytes regular durable-файла с ключом `(attempt-n, step-id, input-id)` без текстового преобразования.
 

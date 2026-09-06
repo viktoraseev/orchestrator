@@ -10,8 +10,10 @@ use tempfile::TempDir;
 struct ConfigWorld {
     root: Option<TempDir>,
     home: Option<TempDir>,
+    current_dir: Option<TempDir>,
     relative_orc_home: bool,
     empty_orc_home: bool,
+    unset_orc_home: bool,
     output: Option<Output>,
     initial_config: Option<Vec<u8>>,
     concurrent_outputs: Vec<Output>,
@@ -56,6 +58,26 @@ fn empty_orc_home_uses_home(world: &mut ConfigWorld) {
     world.empty_orc_home = true;
 }
 
+#[given("HOME/.orc содержит лимит 7, current directory содержит лимит 11, а ORC_HOME отсутствует")]
+fn default_home_without_current_directory_fallback(world: &mut ConfigWorld) {
+    let home = TempDir::new().expect("test HOME must be created");
+    fs::create_dir(home.path().join(".orc")).expect("default state root must be created");
+    fs::write(
+        home.path().join(".orc/config.yaml"),
+        "max-parallel-agents: 7\n",
+    )
+    .expect("default config must be written");
+    let current_dir = TempDir::new().expect("test current directory must be created");
+    fs::write(
+        current_dir.path().join("config.yaml"),
+        "max-parallel-agents: 11\n",
+    )
+    .expect("current-directory config must be written");
+    world.home = Some(home);
+    world.current_dir = Some(current_dir);
+    world.unset_orc_home = true;
+}
+
 #[given("config.yaml с неизвестным полем")]
 fn config_with_unknown_field(world: &mut ConfigWorld) {
     let root = TempDir::new().expect("test root must be created");
@@ -68,6 +90,7 @@ fn config_with_unknown_field(world: &mut ConfigWorld) {
 #[allow(clippy::needless_pass_by_value)]
 fn config_with_schema_violation(world: &mut ConfigWorld, case: String) {
     let contents = match case.as_str() {
+        "root is sequence" => "[]\n",
         "duplicate root field" => "max-parallel-agents: 7\nmax-parallel-agents: 9\n",
         "default-workflow is not string" => "default-workflow: 7\n",
         "default-agent has repeated hyphen" => "default-agent: bad--agent\n",
@@ -366,6 +389,9 @@ fn final_limit_is_one_candidate(world: &mut ConfigWorld) {
 fn run(world: &mut ConfigWorld, arguments: &[&str]) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orchestrator"));
     command.args(arguments);
+    if let Some(current_dir) = &world.current_dir {
+        command.current_dir(current_dir.path());
+    }
     if let Some(home) = &world.home {
         command.env("HOME", home.path());
     }
@@ -373,6 +399,8 @@ fn run(world: &mut ConfigWorld, arguments: &[&str]) {
         command.env("ORC_HOME", "relative");
     } else if world.empty_orc_home {
         command.env("ORC_HOME", "");
+    } else if world.unset_orc_home {
+        command.env_remove("ORC_HOME");
     } else {
         let root = world.root.as_ref().expect("scenario must define a root");
         command.env("ORC_HOME", root.path());

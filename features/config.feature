@@ -1,7 +1,7 @@
 Feature: Конфигурация orchestrator
   Конфигурация читается только из выбранного корня состояния и имеет стабильное CLI-представление.
 
-  @cli:config-get-config-set-и-config-list @format:config-yaml @process
+  @cli:config-get-config-set-и-config-list @process
   Rule: Отсутствующая конфигурация имеет документированные эффективные значения
 
     Scenario Outline: Чтение значения без config.yaml
@@ -22,8 +22,15 @@ Feature: Конфигурация orchestrator
       Then команда завершается с кодом 0
       And stdout равен строкам default-workflow null, default-agent null и max-parallel-agents 5
 
-  @cli:корень-состояния-и-переменные-окружения @process
+  @process
   Rule: ORC_HOME целиком задаёт корень состояния
+    При отсутствующем или пустом ORC_HOME корнем является только `$HOME/.orc`; непустой ORC_HOME обязан быть absolute path, полностью заменяет default root и не добавляет поиск в current directory или fallback-пути.
+
+    Scenario: Без ORC_HOME используется HOME/.orc без fallback в current directory
+      Given HOME/.orc содержит лимит 7, current directory содержит лимит 11, а ORC_HOME отсутствует
+      When я выполняю config get max-parallel-agents
+      Then команда завершается с кодом 0
+      And stdout равен строке "7"
 
     Scenario: Абсолютный ORC_HOME заменяет корень из HOME
       Given HOME содержит лимит 7, а абсолютный ORC_HOME содержит лимит 11
@@ -43,8 +50,9 @@ Feature: Конфигурация orchestrator
       Then команда завершается с кодом 3
       And stderr начинается с "error: config:"
 
-  @cli:config-get-config-set-и-config-list @format:config-yaml @process
+  @cli:config-get-config-set-и-config-list @process
   Rule: Ошибки config-команд не маскируются значениями по умолчанию
+    Необязательный `<root>/config.yaml` при наличии является закрытым YAML mapping: duplicate keys, неизвестные поля, нарушения field types и форматов symbolic IDs делают весь config невалидным до применения defaults или вывода.
 
     Scenario: Config со всеми четырьмя поддерживаемыми полями валиден
       Given config.yaml со всеми поддерживаемыми полями
@@ -71,6 +79,7 @@ Feature: Конфигурация orchestrator
 
       Examples:
         | case |
+        | root is sequence |
         | duplicate root field |
         | default-workflow is not string |
         | default-agent has repeated hyphen |
@@ -85,7 +94,7 @@ Feature: Конфигурация orchestrator
         | Agent model is invalid |
         | Agent reasoning is invalid |
 
-  @cli:config-get-config-set-и-config-list @format:config-yaml @process
+  @cli:config-get-config-set-и-config-list @process
   Rule: max-parallel-agents изменяется атомарно
 
     Scenario: Положительный лимит сохраняется
@@ -131,7 +140,7 @@ Feature: Конфигурация orchestrator
       Then команда завершается с кодом 2
       And config.yaml остался побайтово неизменным
 
-  @cli:config-get-config-set-и-config-list @cli:корень-состояния-и-переменные-окружения @process
+  @cli:config-get-config-set-и-config-list @process
   Rule: default-workflow ссылается на существующий workflow template
 
     Scenario: Существующий workflow выбирается без materialization
@@ -160,7 +169,7 @@ Feature: Конфигурация orchestrator
       Then команда завершается с кодом 0
       And config.yaml сохраняет Agent и лимит при выборе workflow research
 
-  @cli:config-get-config-set-и-config-list @format:config-yaml @process
+  @cli:config-get-config-set-и-config-list @process
   Rule: default-agent ссылается на существующего именованного Agent
 
     Scenario: Существующий Agent выбирается по умолчанию

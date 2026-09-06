@@ -1,6 +1,6 @@
 # CLI-контракт orchestrator
 
-Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель run, attempts, artifacts и workflow graph, включая cycles, planning и validation, определена в `features/*.feature`, а durable layout — в `format.spec.md`.
+Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель config, source definitions, durable layout, run, attempts, artifacts и workflow graph, включая cycles, planning и validation, определена в `features/*.feature`.
 
 ## Команды и аргументы
 
@@ -16,13 +16,6 @@
 - `orchestrator workflow plan <workflow-id> [--format text|json]` показывает полностью materialized execution plan без создания run.
 - `orchestrator attempt complete [--artifact <input-id> <path>]...` передаёт полный текущий кандидат completion и artifacts; attempt завершается только после возврата процесса агента.
 - `orchestrator session activate <session-id>` фиксирует activation внутренней сессии текущего attempt.
-Файлы config, workflow, prompt templates и runs размещаются только по layout из `format.spec.md`. CLI не ищет их в текущем каталоге и не применяет fallback-пути.
-
-## Корень состояния и переменные окружения
-
-- Пути из `format.spec.md` отсчитываются от корня состояния. Корень по умолчанию задан там и разрешается через `HOME`.
-- Замена корня не добавляет альтернативных мест поиска: правило об отсутствии поиска в текущем каталоге и fallback-путей действует и для `ORC_HOME`.
-
 ## Выбор workflow
 
 После выбора workflow config всё равно читается для разрешения Agents и `default-agent`.

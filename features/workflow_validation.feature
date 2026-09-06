@@ -47,7 +47,6 @@ Feature: Validation workflow
         | повторяющийся root key            | duplicate field         |
         | синтаксически невалидный YAML      | невалидный workflow     |
 
-  @format:config-yaml
   Rule: Каждый Step получает совместимого Agent с native resume
     Каждый Step получает явно названный Agent либо `default-agent`; validation проверяет существование Agent, его type, model, reasoning и поддержку native resume тем же preflight при validate и start, а materialized run повторно проверяется при resume без fallback на новую session.
 

@@ -71,7 +71,7 @@ Feature: Встроенные Agent types
         | codex  |
         | claude |
 
-  @process @cli:корень-состояния-и-переменные-окружения @cli:вывод-команд
+  @process @cli:вывод-команд
   Rule: Codex adapter строит и интерпретирует собственный protocol
     Новая non-human session получает args `exec --json --model model --config model_reasoning_effort="high" <prompt>`, а resume вставляет `resume` и native session ID.
 
@@ -160,7 +160,7 @@ Feature: Встроенные Agent types
         | codex  |
         | claude |
 
-  @process @cli:корень-состояния-и-переменные-окружения
+  @process
   Rule: Executable override не выполняет PATH lookup
     Непустой ORC_AGENT_COMMAND является единым absolute executable regular file для обоих Agent types; override не добавляет type-ID и не меняет type-specific args, environment или protocol.
 

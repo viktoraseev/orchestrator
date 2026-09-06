@@ -4,6 +4,7 @@ Feature: Durable lifecycle run
   @cli:start
   Rule: Start обещает только durable run
     После общего preflight start резервирует и блокирует run, durable-публикует проверенный materialized workflow до initial attempt и запускает Agent только после обеих публикаций; возврат Agent process без принятого completion оставляет attempt незавершённым и завершает команду runtime failure без автоматического повторного запуска или native resume в этой lifecycle-команде.
+    Durable run находится только в `<root>/run/<run-id>`: materialized workflow публикуется как `spec.yaml`, attempts как `<n>.<step-id>.attempt.yaml`, а artifacts как `<n>.<step-id>.<input-id>.artifact`.
     До резервирования RunId source workflow, prompts и Agents materialize’ятся только в памяти; `spec.yaml` содержит ровно `workflow-id`, effective `max-parallel-agents`, mapping всех run parameters и Steps в source order, а каждый Agent Step — ровно `id`, materialized `agent`, точный `prompt` либо null, `human`, `process: null`, `depends-on` и `outputs`.
     Durable snapshot не содержит AgentId, PromptId или ссылок на изменяемые config, workflow и prompt files, публикуется атомарно под фиксированным именем после получения Run lock и остаётся неизменным при resume.
     Initial attempt имеет глобальный номер 0 и имя `0.<first-step-id>.attempt.yaml`; его закрытый YAML mapping содержит только пустые sequences `input` и `events`, не materialize'ит данные workflow и не хранит производные статусы.

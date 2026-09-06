@@ -81,7 +81,7 @@ Feature: Восстановление durable run
       Then lifecycle завершается с кодом 1
       And target получает следующий свободный глобальный номер 100
 
-  @format:корень-состояния-и-layout @cli:resume
+  @cli:resume
   Rule: Файловые остатки незавершённого attempt не входят в durable-модель
     Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не участвуют в validation, recovery или workflow graph и не удаляются автоматически.
 

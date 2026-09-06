@@ -959,6 +959,12 @@ fn run_contains_unlocked_lock_file(world: &mut LifecycleWorld) {
     assert!(run_directory(world).join("active.lock").is_file());
 }
 
+#[given("unlocked lock-файл содержит произвольные bytes")]
+fn unlocked_lock_file_contains_arbitrary_bytes(world: &mut LifecycleWorld) {
+    fs::write(run_directory(world).join("active.lock"), [0x00, 0xff, 0x80])
+        .expect("unlocked lock file must accept arbitrary bytes");
+}
+
 #[given("подготовлен single-step human workflow")]
 fn human_workflow(world: &mut LifecycleWorld) {
     prepare_graph(

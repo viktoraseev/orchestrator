@@ -1,8 +1,9 @@
 Feature: Read-only catalogs source definitions
   Catalog commands читают только выбранный state root, не materialize'ят workflow, не создают run и не изменяют файлы; весь catalog проверяется до renderer, поэтому ошибка не даёт partial stdout.
 
-  @format:корень-состояния-и-layout @format:идентификаторы-и-номера @cli:source-catalogs
+  @cli:source-catalogs
   Rule: Workflow catalog перечисляет source templates без materialization
+    Workflow template обнаруживается только как regular file `<root>/workflow/<workflow-id>.yaml`; contract basename является валидным WorkflowId, а посторонние и temporary entries не входят в catalog.
 
     Scenario: Пустой workflow catalog успешен через публичный API
       Given подготовлен пустой source catalog root
@@ -42,8 +43,9 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @format:config-yaml @cli:source-catalogs
+  @cli:source-catalogs
   Rule: Agent catalog использует полную config validation
+    Named Agents читаются только из optional `<root>/config.yaml`; отсутствие файла или пустой agents mapping даёт пустой catalog, а ошибка любого config field отклоняет весь catalog до вывода.
 
     @process
     Scenario: Отсутствующий config даёт пустой Agent catalog
@@ -80,9 +82,9 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @format:идентификаторы-и-номера @cli:source-catalogs
+  @cli:source-catalogs
   Rule: Prompt catalog полностью читает UTF-8 templates
-    Prompt catalog читает каждый regular `.md` contract file как произвольный UTF-8 Markdown без YAML-декодирования и считает точное число bytes; non-UTF-8 template делает весь catalog невалидным до вывода.
+    Prompt catalog читает каждый regular `<root>/prompt/<prompt-id>.md` contract file как произвольный UTF-8 Markdown без YAML-декодирования и считает точное число bytes; basename является валидным PromptId, а non-UTF-8, посторонние и temporary entries обрабатываются до вывода по правилам catalog.
 
     Scenario: Typed prompt catalog считает UTF-8 bytes
       Given подготовлен prompt template unicode с содержимым Привет
@@ -136,7 +138,7 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @format:идентификаторы-и-номера @cli:source-catalogs
+  @cli:source-catalogs
   Rule: Workflow show читает source structure без materialization
     Workflow show выбирает ровно один source template, проверяет его структурную schema и symbolic IDs, сохраняет исходный порядок Steps и source references, но не читает config или prompts, не применяет defaults и не проверяет существование references либо graph reachability.
 
@@ -182,7 +184,7 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 2
       And catalog output пуст
 
-  @format:config-yaml @format:идентификаторы-и-номера @cli:source-catalogs
+  @cli:source-catalogs
   Rule: Agent show выбирает Agent только после полной config validation
 
     Scenario: Typed Agent show возвращает выбранную validated запись
@@ -227,7 +229,7 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 4
       And catalog output пуст
 
-  @format:идентификаторы-и-номера @cli:source-catalogs
+  @cli:source-catalogs
   Rule: Prompt show читает только выбранный template и сохраняет точные bytes
     Prompt show возвращает выбранный arbitrary UTF-8 Markdown побайтово, не применяя YAML-декодирование и не добавляя финальный newline.
 

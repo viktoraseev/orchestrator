@@ -1,7 +1,7 @@
 Feature: Control endpoint активных Agent attempts
   Дочерние control-команды передают события единственному supervisor текущего run и никогда не изменяют durable-файлы напрямую.
 
-  @process @cli:session-activate-и-attempt-complete @cli:корень-состояния-и-переменные-окружения
+  @process @cli:session-activate-и-attempt-complete
   Rule: Parent принимает control call только для активного inherited context
     Перед каждым Agent process supervisor передаёт endpoint, RunId и attempt через environment; parent принимает запрос только для обслуживаемого run и активного attempt, а недоступный, чужой или закрытый context возвращает код 5 без изменения durable run.
 

@@ -1,7 +1,7 @@
 Feature: Восстановление durable run
   Resume проверяет полную durable-модель до запуска Agent и сохраняет crash leftovers вне модели.
 
-  @spec:создание-и-восстановление-agent-attempt @format:agent-attempt-record @format:artifact @cli:resume
+  @format:agent-attempt-record @format:artifact @cli:resume
   Rule: Противоречивая durable-модель отклоняется до побочных эффектов
     После получения Run lock и до запуска executor, вычисления frontier или durable publication resume полностью проверяет materialized workflow, все attempt records и artifacts завершённых attempts на соответствие format и workflow graph; любая ошибка завершает команду без запуска Agent и изменения durable-модели.
     После успешной проверки состояние attempt вычисляется из validated materialized workflow, полного attempt record и artifacts; отдельный durable status не сохраняется.
@@ -31,7 +31,29 @@ Feature: Восстановление durable run
       And Agent не запускается повторно
       And lifecycle сообщает already completed
 
-  @spec:создание-и-восстановление-agent-attempt @format:корень-состояния-и-layout @format:artifact @cli:resume
+  @workflow:initial-activation-dependencies-и-frontier @format:agent-attempt-record @format:artifact @cli:resume
+  Rule: Номера attempts глобальны и не переиспользуются
+    Attempt существует только после атомарной публикации record; первый attempt получает номер 0, а каждый следующий — номер больше любого опубликованного или зарезервированного crash-остатком номера во всём run, поэтому пропуски не заполняются.
+
+    Scenario: Resume создаёт первый attempt 0 после crash до его публикации
+      Given подготовлен циклический durable run без attempt records
+      When run продолжается через lifecycle API
+      Then lifecycle завершается с кодом 1
+      And resume публикует и запускает первый attempt 0
+
+    Scenario: Пропуски между опубликованными attempts не заполняются
+      Given подготовлен ready durable run с attempts 0, 2 и 4
+      When готовый target продолжается через lifecycle API
+      Then lifecycle завершается с кодом 1
+      And новый join attempt получает номер 5 без заполнения пропусков 1 и 3
+
+    Scenario: Новый attempt не переиспользует номер orphan artifact
+      Given подготовлен ready durable run с orphan artifact 99
+      When готовый target продолжается через lifecycle API
+      Then lifecycle завершается с кодом 1
+      And target получает следующий свободный глобальный номер 100
+
+  @format:корень-состояния-и-layout @format:artifact @cli:resume
   Rule: Файловые остатки незавершённого attempt не входят в durable-модель
     Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не участвуют в validation, recovery или workflow graph и не удаляются автоматически.
 
@@ -41,9 +63,3 @@ Feature: Восстановление durable run
       Then lifecycle завершается с кодом 1
       And resume продолжает исходный unfinished attempt
       And crash leftovers остались побайтово неизменными
-
-    Scenario: Новый attempt не переиспользует номер orphan artifact
-      Given подготовлен ready durable run с orphan artifact 99
-      When ready run с orphan artifact продолжается через lifecycle API
-      Then lifecycle завершается с кодом 1
-      And target получает следующий свободный глобальный номер 100

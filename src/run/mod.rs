@@ -451,6 +451,23 @@ mod tests {
     }
 
     #[test]
+    fn attempt_record_failure_before_initial_commit_leaves_attempt_absent() {
+        let root = TempDir::new().expect("test root must be created");
+        let name = "0.step.attempt.yaml";
+
+        let result = publish_bytes_with_hook(
+            root.path(),
+            name,
+            b"input: []\nevents: []\n",
+            "test",
+            || Err(std::io::Error::other("injected before commit")),
+        );
+
+        assert!(result.is_err());
+        assert!(!root.path().join(name).exists());
+    }
+
+    #[test]
     fn inspection_retries_snapshot_changed_between_fingerprints() {
         let root = TempDir::new().expect("test root must be created");
         let spec_path = root.path().join("spec.yaml");

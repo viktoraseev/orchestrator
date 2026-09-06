@@ -956,9 +956,8 @@ fn partially_satisfied_durable_run(world: &mut LifecycleWorld) {
 
 #[given("подготовлен durable run с полностью удовлетворённой dependency group")]
 fn fully_satisfied_durable_run(world: &mut LifecycleWorld) {
-    prepare_durable_run(
+    prepare_satisfied_dependency_run(
         world,
-        "workflow-id: delivery\nmax-parallel-agents: 5\nsteps:\n- id: root\n  agent: &agent\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: []\n  outputs: []\n- id: left\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [root]\n  outputs: []\n- id: right\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [root]\n  outputs: []\n- id: join\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [left, right]\n  outputs: []\n",
         &[
             (
                 "0.root.attempt.yaml",
@@ -973,6 +972,44 @@ fn fully_satisfied_durable_run(world: &mut LifecycleWorld) {
                 "input:\n- 0\nevents:\n- type: completed\n",
             ),
         ],
+    );
+}
+
+#[given("подготовлен ready durable run с attempts 0, 2 и 4")]
+fn ready_run_with_attempt_number_gaps(world: &mut LifecycleWorld) {
+    prepare_satisfied_dependency_run(
+        world,
+        &[
+            (
+                "0.root.attempt.yaml",
+                "input: []\nevents:\n- type: completed\n",
+            ),
+            (
+                "2.left.attempt.yaml",
+                "input:\n- 0\nevents:\n- type: completed\n",
+            ),
+            (
+                "4.right.attempt.yaml",
+                "input:\n- 0\nevents:\n- type: completed\n",
+            ),
+        ],
+    );
+}
+
+#[given("подготовлен циклический durable run без attempt records")]
+fn durable_run_without_attempt_records(world: &mut LifecycleWorld) {
+    prepare_durable_run(
+        world,
+        "workflow-id: delivery\nmax-parallel-agents: 5\nsteps:\n- id: a\n  agent: &agent\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: [c]\n  outputs: [result]\n- id: b\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [a]\n  outputs: [result]\n- id: c\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [b]\n  outputs: [result]\n",
+        &[],
+    );
+}
+
+fn prepare_satisfied_dependency_run(world: &mut LifecycleWorld, attempts: &[(&str, &str)]) {
+    prepare_durable_run(
+        world,
+        "workflow-id: delivery\nmax-parallel-agents: 5\nsteps:\n- id: root\n  agent: &agent\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: []\n  outputs: []\n- id: left\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [root]\n  outputs: []\n- id: right\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [root]\n  outputs: []\n- id: join\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [left, right]\n  outputs: []\n",
+        attempts,
     );
 }
 
@@ -1692,13 +1729,6 @@ fn resume_corrupted_run(world: &mut LifecycleWorld) {
 
 #[when("run с crash leftovers продолжается через lifecycle API")]
 fn resume_run_with_crash_leftovers(world: &mut LifecycleWorld) {
-    let (observed, calls) = resume_with_fake(world, [Behavior::ReturnWithoutCompletion]);
-    world.observed = Some(observed);
-    world.calls = calls;
-}
-
-#[when("ready run с orphan artifact продолжается через lifecycle API")]
-fn resume_ready_run_with_orphan(world: &mut LifecycleWorld) {
     let (observed, calls) = resume_with_fake(world, [Behavior::ReturnWithoutCompletion]);
     world.observed = Some(observed);
     world.calls = calls;
@@ -2638,6 +2668,33 @@ fn target_skips_orphan_attempt_number(world: &mut LifecycleWorld) {
         .expect("join attempt must be readable");
     assert!(record.contains("input:\n- 1\n- 2"));
     assert!(!run_directory(world).join("3.join.attempt.yaml").exists());
+}
+
+#[then("новый join attempt получает номер 5 без заполнения пропусков 1 и 3")]
+fn next_attempt_does_not_fill_global_number_gaps(world: &mut LifecycleWorld) {
+    assert_eq!(world.calls.len(), 1);
+    assert_eq!(world.calls[0].step_id, "join");
+    assert_eq!(world.calls[0].attempt, 5);
+    assert_eq!(
+        attempt_record_names(world),
+        [
+            "0.root.attempt.yaml",
+            "2.left.attempt.yaml",
+            "4.right.attempt.yaml",
+            "5.join.attempt.yaml",
+        ]
+    );
+}
+
+#[then("resume публикует и запускает первый attempt 0")]
+fn resume_publishes_first_attempt_zero(world: &mut LifecycleWorld) {
+    assert_eq!(world.calls.len(), 1);
+    assert_eq!(world.calls[0].step_id, "a");
+    assert_eq!(world.calls[0].attempt, 0);
+    assert_eq!(attempt_record_names(world), ["0.a.attempt.yaml"]);
+    let record = fs::read_to_string(run_directory(world).join("0.a.attempt.yaml"))
+        .expect("initial attempt must be readable");
+    assert!(record.contains("input: []"));
 }
 
 #[then("одновременно работали ровно 2 branch Agents")]

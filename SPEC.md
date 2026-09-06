@@ -63,34 +63,6 @@ Run lock. Между последовательными запусками steps
 процесса. GC и другие операции перемещения или удаления run не входят в
 текущий scope.
 
-## Создание и восстановление Agent attempt
-
-Атомарная публикация Agent attempt record является единственной commit-точкой
-создания Agent attempt. До неё attempt не существует. Следующий
-новый attempt любого step получает `0`, если во всём run ещё нет опубликованных
-attempt records, иначе на единицу больше максимального использованного во всём
-run `n`; пропуски не заполняются. Так artifact, оставшийся после crash до
-создания attempt, не вызывает повторного использования своего имени.
-
-Отдельной commit-точки в виде `output` нет. После получения Run lock
-orchestrator читает факты из каждого Agent attempt record, а соответствующий
-Agent type выводит из них и materialized workflow, завершён ли attempt успешно
-или требует продолжения:
-
-| Durable-состояние | Значение | Действие при `resume` |
-| --- | --- | --- |
-| Agent attempt record отсутствует | Attempt не существует. Оставшиеся artifacts или временные файлы сами по себе его не создают. | Не восстанавливать attempt; такие файлы не участвуют в workflow. |
-| Completion event отсутствует, как и подтверждённая Agent session activation | Attempt создан, но успешное выполнение не подтверждено durable. | Для Agent создать новую внутреннюю сессию, для Process повторно запустить тот же materialized command с тем же `n`. |
-| Completion event отсутствует, но есть activations или оставшиеся после прерванной финализации файлы | Attempt не завершён. В частности, `/exit`, crash и возврат процесса без кандидата сами по себе не завершают Step и не создают durable-факт. | Только по явному `resume` продолжить последнюю activation в durable-порядке. Незавершённые файлы не передаются агенту и не участвуют в графе. |
-| Agent attempt record оканчивается валидным `completed` и присутствуют все объявленные artifacts | Agent вернул управление с кандидатом completion либо Process вернул `0` с валидными outputs; attempt успешно завершён, а его artifacts зафиксированы. При пустом `outputs` их нет. | Не запускать executor; сделать artifacts доступными и пересчитать graph по `workflow.spec.md`. |
-| Agent attempt record или artifact завершённого attempt не соответствует `format.spec.md` либо durable input activation противоречит `workflow.spec.md` | Run невозможно однозначно восстановить. | Завершить `resume` с ошибкой до запуска агента. |
-
-Artifacts и completion публикуются только при возврате процесса агента с принятым кандидатом. Успешный ответ `attempt complete` разрешает агенту продолжить работу, заменить кандидат или активировать другую session и сам по себе не завершает Step. Crash до возврата процесса или до commit-точки финализации оставляет attempt незавершённым, а volatile-кандидат и возможные файловые остатки не сохраняют частичный результат агента и не участвуют в восстановлении.
-
-Artifact без соответствующего Agent attempt record, файловый остаток attempt без
-completion и временный файл атомарной записи не входят в модель и игнорируются;
-их автоматическая очистка не входит в текущий scope.
-
 ## Read-only inspection
 
 - Read-only inspection загружает materialized workflow, attempts и artifacts через ту же validation границу, что `resume`.

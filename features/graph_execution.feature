@@ -1,7 +1,7 @@
 Feature: Выполнение workflow graph
   Durable facts определяют input mapping, frontier и глобальную нумерацию attempts.
 
-  @workflow:initial-activation-dependencies-и-frontier @workflow:inputs-и-prompt @workflow:fail-fast-input-validation @spec:создание-и-восстановление-agent-attempt @format:agent-attempt-record
+  @workflow:initial-activation-dependencies-и-frontier @workflow:inputs-и-prompt @workflow:fail-fast-input-validation @format:agent-attempt-record
   Rule: Линейный target получает зафиксированную версию source artifacts
 
     Scenario: Target получает path, content и durable input source attempt
@@ -34,7 +34,7 @@ Feature: Выполнение workflow graph
       Then lifecycle завершается с кодом 0
       And join Agent получает inputs left:shared и right:shared
 
-  @workflow:initial-activation-dependencies-и-frontier @workflow:циклы-terminal-и-blocked-run @spec:создание-и-восстановление-agent-attempt @cli:resume
+  @workflow:initial-activation-dependencies-и-frontier @workflow:циклы-terminal-и-blocked-run @cli:resume
   Rule: Циклический workflow повторно активирует Steps по свежим artifacts
 
     Scenario: Первый повторный обход использует feedback вместо bootstrap input

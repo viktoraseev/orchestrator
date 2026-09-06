@@ -92,16 +92,13 @@ impl RunGuard {
     }
 }
 
-pub(super) fn maximum_reserved_attempt_number(
+/// Возвращает 0 для run без зарезервированных attempts, иначе монотонно увеличивает максимальный номер из durable и crash-leftover имён; см. Rule «Номера attempts глобальны и не переиспользуются» в `features/recovery.feature`.
+pub(super) fn next_available_attempt_number(
     directory: &Path,
     attempts: &[DurableAttempt],
     run_id: RunId,
 ) -> Result<u64, CommandError> {
-    let mut maximum = attempts
-        .iter()
-        .map(|attempt| attempt.number)
-        .max()
-        .unwrap_or(0);
+    let mut maximum = attempts.iter().map(|attempt| attempt.number).max();
     for entry in fs::read_dir(directory).map_err(|source| {
         runtime(
             "resume",
@@ -113,13 +110,15 @@ pub(super) fn maximum_reserved_attempt_number(
             .map_err(|source| runtime("resume", "не удалось прочитать durable entry", source))?;
         let name = entry.file_name();
         if let Some(number) = reserved_attempt_number(&name.to_string_lossy()) {
-            maximum = maximum.max(number);
+            maximum = Some(maximum.map_or(number, |current| current.max(number)));
         }
     }
-    if maximum == u64::MAX {
-        return Err(invalid_run(run_id, "attempt number overflow"));
-    }
-    Ok(maximum)
+    let Some(maximum) = maximum else {
+        return Ok(0);
+    };
+    maximum
+        .checked_add(1)
+        .ok_or_else(|| invalid_run(run_id, "attempt number overflow"))
 }
 
 fn reserved_attempt_number(name: &str) -> Option<u64> {
@@ -201,6 +200,7 @@ pub(super) fn validate_materialized(
         .map_err(|message| invalid_run(run_id, &message))
 }
 
+/// Загружает и проверяет полную durable-модель attempts; пустая модель допустима для recovery после crash до публикации initial attempt, а частичная модель обязана начинаться с непротиворечивого attempt 0; см. Rules в `features/recovery.feature`.
 pub(super) fn load_attempts(
     directory: &Path,
     workflow: &MaterializedWorkflow,
@@ -255,11 +255,9 @@ pub(super) fn load_attempts(
         });
     }
     attempts.sort_by_key(|attempt| attempt.number);
-    if attempts.is_empty()
-        || attempts[0].number != 0
-        || attempts[0].step_index != 0
-        || !attempts[0].record.input().is_empty()
-    {
+    if attempts.first().is_some_and(|initial| {
+        initial.number != 0 || initial.step_index != 0 || !initial.record.input().is_empty()
+    }) {
         return Err(invalid_run(
             run_id,
             "initial attempt 0 отсутствует или противоречив",

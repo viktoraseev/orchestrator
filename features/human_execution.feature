@@ -25,7 +25,7 @@ Feature: Human Agent lifecycle
       Then lifecycle завершается с кодом 0
       And process human Agent подтвердил прямой TTY
 
-  @cli:/exit-и-user-shutdown @cli:вывод-команд @workflow:планирование @spec:создание-и-восстановление-agent-attempt
+  @cli:/exit-и-user-shutdown @cli:вывод-команд @workflow:планирование
   Rule: Явный /exit оставляет human attempt для resume
     Во время user shutdown возврат одного уже работающего non-human Agent не прерывает ожидание остальных, но новые activations не запускаются.
 

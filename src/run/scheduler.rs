@@ -8,7 +8,7 @@ use std::thread;
 use super::control::{ControlHub, ControlServer, lock_storage};
 use super::executor::{AttemptExecution, AttemptOutcome, prepare_agent_input, run_current_attempt};
 use super::storage::{
-    RunGuard, attempt_name, load_attempts, maximum_reserved_attempt_number, publish_yaml,
+    RunGuard, attempt_name, load_attempts, next_available_attempt_number, publish_yaml,
 };
 use super::{LifecycleSignals, TerminalMode, blocked, invalid_run};
 use crate::agent::{AgentCancellation, AgentRegistry, TerminationSignal};
@@ -288,11 +288,17 @@ pub(super) struct Frontier {
     pub(super) missing: Vec<String>,
 }
 
-/// Вычисляет ready и частично удовлетворённые dependency groups только из validated durable attempts; см. Rule «Fan-out и fan-in frontier вычисляется из durable attempts» в `features/graph_execution.feature`.
+/// Вычисляет bootstrap, ready и частично удовлетворённые dependency groups только из validated durable attempts; см. Rules «Fan-out и fan-in frontier вычисляется из durable attempts» в `features/graph_execution.feature` и «Номера attempts глобальны и не переиспользуются» в `features/recovery.feature`.
 pub(super) fn compute_frontier(
     workflow: &MaterializedWorkflow,
     attempts: &[DurableAttempt],
 ) -> Result<Frontier, CommandError> {
+    if attempts.is_empty() {
+        return Ok(Frontier {
+            ready: vec![0],
+            missing: Vec::new(),
+        });
+    }
     let mut ready = Vec::new();
     let mut missing = Vec::new();
     let mut missing_seen = HashSet::new();
@@ -351,27 +357,32 @@ fn publish_ready_attempts(
     ready: &[usize],
     context: &str,
 ) -> Result<(), CommandError> {
-    let mut next = maximum_reserved_attempt_number(&guard.directory, attempts, run_id)?
-        .checked_add(1)
-        .ok_or_else(|| invalid_run(run_id, "attempt number overflow"))?;
+    let mut next = next_available_attempt_number(&guard.directory, attempts, run_id)?;
     for &step_index in ready {
         let step = &workflow.steps[step_index];
-        let mut input = Vec::with_capacity(step.depends_on.len());
-        for dependency in &step.depends_on {
-            let source_index = workflow
-                .steps
-                .iter()
-                .position(|candidate| candidate.id == *dependency)
-                .ok_or_else(|| invalid_run(run_id, "unknown dependency"))?;
-            let source = attempts
-                .iter()
-                .filter(|attempt| {
-                    attempt.step_index == source_index && attempt.record.is_completed()
-                })
-                .max_by_key(|attempt| attempt.number)
-                .ok_or_else(|| invalid_run(run_id, "ready Step не имеет completed dependency"))?;
-            input.push(source.number);
-        }
+        let input = if attempts.is_empty() && step_index == 0 {
+            Vec::new()
+        } else {
+            let mut input = Vec::with_capacity(step.depends_on.len());
+            for dependency in &step.depends_on {
+                let source_index = workflow
+                    .steps
+                    .iter()
+                    .position(|candidate| candidate.id == *dependency)
+                    .ok_or_else(|| invalid_run(run_id, "unknown dependency"))?;
+                let source = attempts
+                    .iter()
+                    .filter(|attempt| {
+                        attempt.step_index == source_index && attempt.record.is_completed()
+                    })
+                    .max_by_key(|attempt| attempt.number)
+                    .ok_or_else(|| {
+                        invalid_run(run_id, "ready Step не имеет completed dependency")
+                    })?;
+                input.push(source.number);
+            }
+            input
+        };
         let record = AttemptRecord::pending(input);
         let candidate = DurableAttempt {
             number: next,

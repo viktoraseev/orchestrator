@@ -1,7 +1,7 @@
 Feature: Read-only catalogs source definitions
   Catalog commands читают только выбранный state root, не materialize'ят workflow, не создают run и не изменяют файлы; весь catalog проверяется до renderer, поэтому ошибка не даёт partial stdout.
 
-  @spec:source-catalogs @format:корень-состояния-и-layout @format:идентификаторы-и-номера @cli:source-catalogs
+  @format:корень-состояния-и-layout @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Workflow catalog перечисляет source templates без materialization
 
     Scenario: Пустой workflow catalog успешен через публичный API
@@ -42,7 +42,7 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @spec:source-catalogs @format:config-yaml @cli:source-catalogs
+  @format:config-yaml @cli:source-catalogs
   Rule: Agent catalog использует полную config validation
 
     @process
@@ -80,7 +80,7 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @spec:source-catalogs @format:prompt-template @format:идентификаторы-и-номера @cli:source-catalogs
+  @format:prompt-template @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Prompt catalog полностью читает UTF-8 templates
 
     Scenario: Typed prompt catalog считает UTF-8 bytes
@@ -135,8 +135,9 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @spec:source-catalogs @format:workflow-yaml @format:идентификаторы-и-номера @cli:source-catalogs
+  @format:workflow-yaml @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Workflow show читает source structure без materialization
+    Workflow show выбирает ровно один source template, проверяет его структурную schema и symbolic IDs, сохраняет исходный порядок Steps и source references, но не читает config или prompts, не применяет defaults и не проверяет существование references либо graph reachability.
 
     Scenario: Typed source workflow сохраняет неразрешённые references и порядок Steps
       Given подготовлен source workflow demo с несуществующими Agent и prompt references
@@ -180,7 +181,7 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 2
       And catalog output пуст
 
-  @spec:source-catalogs @format:config-yaml @format:идентификаторы-и-номера @cli:source-catalogs
+  @format:config-yaml @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Agent show выбирает Agent только после полной config validation
 
     Scenario: Typed Agent show возвращает выбранную validated запись
@@ -225,7 +226,7 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 4
       And catalog output пуст
 
-  @spec:source-catalogs @format:prompt-template @format:идентификаторы-и-номера @cli:source-catalogs
+  @format:prompt-template @format:идентификаторы-и-номера @cli:source-catalogs
   Rule: Prompt show читает только выбранный template и сохраняет точные bytes
 
     Scenario: Typed prompt show возвращает content и размер выбранного template

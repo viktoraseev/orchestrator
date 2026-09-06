@@ -191,11 +191,6 @@ type из materialized workflow и полного содержимого Agent a
 - Watch сразу публикует initial typed snapshot, затем с фиксированным интервалом 100 ms публикует только изменившиеся validated snapshots и завершается на `blocked`, `completed` или поддерживаемом termination signal.
 - Verify с явно выбранным RunId проверяет только этот run.
 
-## Source catalogs
-
-- Workflow show выбирает ровно один source template, проверяет его структурную schema и symbolic IDs, сохраняет исходный порядок Steps и source references, но не читает config или prompts, не применяет defaults и не проверяет существование references либо graph reachability.
-- Workflow plan использует ту же полную materialization и graph validation boundary, что `start`, но возвращает typed кандидат до резервирования RunId, Run lock и durable publication.
-
 ## Главный workflow
 
 1. `orchestrator start` получает выбранный workflow, строит его полный materialized candidate в памяти и применяет те же проверки, что `validate`, не создавая данных run.

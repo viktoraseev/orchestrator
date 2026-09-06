@@ -37,8 +37,9 @@ Feature: Исполнение произвольных процессов в wor
         | повторяющийся parameter          | 2    |
         | parameter без разделителя equals | 2    |
 
-  @format:workflow-template @workflow:validation
+  @format:workflow-template
   Rule: Process schema и placeholders проверяются до создания run
+    Validation проверяет ParameterIds, Process executable, cwd, args, stdout и все ссылки Process placeholders до резервирования run.
 
     Scenario: Workflow tools сохраняют source Process и показывают materialized executor
       Given подготовлен source Process workflow с parameter mode

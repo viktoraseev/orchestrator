@@ -1,9 +1,11 @@
 Feature: Human Agent lifecycle
   Human attempt использует только прямой TTY lifecycle-команды.
 
-  @workflow:планирование @cli:вывод-команд @cli:коды-завершения @cli:сигналы-и-закрытие-терминала
+  @cli:вывод-команд @cli:коды-завершения @cli:сигналы-и-закрытие-терминала
   Rule: Human attempt запускается только с доступным TTY
     Human Agent process напрямую и эксклюзивно занимает TTY lifecycle-команды; если human attempt становится runnable без TTY, lifecycle завершается runtime failure с кодом 1 до запуска Agent, а headless-режима нет.
+    Одновременно работает не более одного human attempt; при свободном slot supervisor выбирает human работу раньше non-human и начинает с самого раннего Step в materialized workflow, а остальные human attempts ждут следующих scheduling passes.
+    Non-human attempts могут работать параллельно с human attempt без доступа к TTY и без сырого live-потока в терминал.
 
     Scenario: Headless lifecycle не создаёт human Agent process
       Given подготовлен single-step human workflow
@@ -25,7 +27,13 @@ Feature: Human Agent lifecycle
       Then lifecycle завершается с кодом 0
       And process human Agent подтвердил прямой TTY
 
-  @cli:/exit-и-user-shutdown @cli:вывод-команд @workflow:планирование
+    Scenario: Готовые human Steps выбираются по workflow order
+      Given подготовлен workflow с двумя готовыми human Steps
+      When human Steps планируются с доступным TTY
+      Then lifecycle завершается с кодом 1
+      And human attempts запущены по порядку first, second
+
+  @cli:/exit-и-user-shutdown @cli:вывод-команд
   Rule: Явный /exit оставляет human attempt для resume
     Во время user shutdown возврат одного уже работающего non-human Agent не прерывает ожидание остальных, но новые activations не запускаются.
 

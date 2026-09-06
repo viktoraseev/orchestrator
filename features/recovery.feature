@@ -20,6 +20,9 @@ Feature: Восстановление durable run
         | невалидный attempt record          |
         | отсутствующий completed artifact   |
         | дополнительный completed artifact  |
+        | неполная input group               |
+        | отсутствующий input source         |
+        | незавершённый input source         |
         | противоречивый input               |
         | повторный глобальный attempt number |
         | невалидный content artifact        |
@@ -30,6 +33,12 @@ Feature: Восстановление durable run
       Then lifecycle завершается с кодом 0
       And Agent не запускается повторно
       And lifecycle сообщает already completed
+
+    Scenario: Старая source version в повторной activation отклоняется
+      Given подготовлен циклический durable run со старой input group
+      When повреждённый run продолжается через lifecycle API
+      Then lifecycle завершается с кодом 3
+      And Agent не запускался и повреждённый durable run не изменился
 
   @format:agent-attempt-record @format:artifact @cli:resume
   Rule: Номера attempts глобальны и не переиспользуются

@@ -1,8 +1,9 @@
 Feature: Validation workflow
-  Выбранный workflow полностью materialize и проверяется в памяти без создания run.
+  Validate и preflight start полностью materialize и проверяют только выбранный workflow в памяти; validate не создаёт run, а start публикует snapshot лишь после успешного резервирования RunId.
 
-  @cli:validate @workflow:validation @format:workflow-template @format:prompt-template
+  @cli:validate @format:workflow-template @format:prompt-template
   Rule: Явно выбранный workflow полностью проверяется в памяти
+    Validation допускает cycles с bootstrap первого Step, outputs без consumers и graph без terminal Step; runtime использует уже validated materialized workflow и не пересчитывает статическую reachability.
 
     Scenario Outline: Допустимые формы workflow проходят validation
       Given подготовлен кандидат workflow "<candidate>"
@@ -18,7 +19,7 @@ Feature: Validation workflow
         | output без consumers                           |
         | выбранный workflow с невалидными невыбранными файлами |
 
-  @workflow:validation @format:workflow-template
+  @format:workflow-template
   Rule: Структура workflow проверяется до ссылок и graph
 
     Scenario Outline: Невалидная структура workflow отклоняется
@@ -41,9 +42,9 @@ Feature: Validation workflow
         | невалидный PromptId с точкой      | не соответствует kebab-case |
         | синтаксически невалидный YAML      | невалидный workflow     |
 
-  @workflow:validation @format:config-yaml
+  @format:config-yaml
   Rule: Каждый Step получает совместимого Agent с native resume
-    Agent type без поддержки native resume отклоняется тем же preflight при validate и start; материализованный run повторно проверяется при resume без fallback на новую session.
+    Каждый Step получает явно названный Agent либо `default-agent`; validation проверяет существование Agent, его type, model, reasoning и поддержку native resume тем же preflight при validate и start, а materialized run повторно проверяется при resume без fallback на новую session.
 
     Scenario Outline: Невалидный выбор Agent отклоняется
       Given подготовлен кандидат workflow "<candidate>"
@@ -59,8 +60,9 @@ Feature: Validation workflow
         | Agent type без native resume      | native resume       |
         | невалидный config                 | невалидный config   |
 
-  @workflow:validation @format:prompt-template
+  @format:prompt-template
   Rule: Prompt placeholders ссылаются только на input mapping Step
+    Каждый PromptId существует; первый описанный Step не содержит placeholders, а placeholder остальных Steps ссылается только на Step из `depends-on` и объявленный InputId из outputs этого source Step.
 
     Scenario Outline: Невалидный prompt отклоняется
       Given подготовлен кандидат workflow "<candidate>"
@@ -80,8 +82,8 @@ Feature: Validation workflow
         | Prompt не UTF-8                    | не является UTF-8        |
         | Prompt не regular file             | не является regular file |
 
-  @workflow:validation
   Rule: Reachability учитывает bootstrap первого Step и полные dependency groups
+    Первый Step статически достижим initial activation, следующий Step — только когда достижимы все его dependencies; non-entry Step без dependencies и cycle без bootstrap-пути не имеют activation path и отклоняются.
 
     Scenario Outline: Недостижимый graph отклоняется
       Given подготовлен кандидат workflow "<candidate>"

@@ -1,6 +1,6 @@
 # CLI-контракт orchestrator
 
-Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель run, attempts, artifacts, graph, activations, frontier и inputs определена в `features/*.feature`, оставшиеся правила cycles, planning и validation — в `workflow.spec.md`, а layout состояния и форматы файлов — в `format.spec.md`.
+Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель run, attempts, artifacts и workflow graph, включая cycles, planning и validation, определена в `features/*.feature`, а layout состояния и форматы файлов — в `format.spec.md`.
 
 ## Команды и аргументы
 
@@ -141,7 +141,7 @@ Config commands не получают run locks и не изменяют сущ�
 ## `validate`
 
 - Global I/O error во время `validate --all` прерывает команду с `1` без partial stdout.
-- Оставшийся контракт cycles, planning и validation workflow graph определён в `workflow.spec.md`.
+- Контракт cycles, planning и validation workflow graph определён в `features/*.feature`.
 - Ошибки выводятся в детерминированном порядке: сначала структура файла, затем steps в порядке workflow, затем ссылки и граф.
 
 ## Сигналы и закрытие терминала

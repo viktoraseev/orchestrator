@@ -81,7 +81,7 @@ Feature: Durable lifecycle run
       Then lifecycle завершается с кодом 0
       And attempt завершён terminal event completed
 
-  @cli:resume @workflow:validation
+  @cli:resume
   Rule: Resume не заменяет несовместимый Agent type новой session
     Потеря поддержки native resume материализованным Agent type завершает resume fail-fast до запуска Agent и без интерактивных вопросов; fallback на новую session запрещён.
 

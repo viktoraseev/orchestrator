@@ -36,7 +36,7 @@ Feature: Публикация Agent completion и artifacts
         | с отсутствующим path |
         | с path на directory |
 
-  @cli:session-activate-и-attempt-complete @cli:вывод-команд @format:artifact @format:agent-attempt-record @workflow:циклы-terminal-и-blocked-run
+  @cli:session-activate-и-attempt-complete @cli:вывод-команд @format:artifact @format:agent-attempt-record
   Rule: Completion становится durable только после возврата Agent
     После возврата Agent последний принятый completion-кандидат финализируется независимо от exit code; без кандидата terminal event не добавляется, и attempt доступен только последующему явному resume.
     Принятый completion-кандидат работающего Agent не завершает source attempt и не изменяет frontier до фиксации возврата процесса.

@@ -35,7 +35,7 @@ Feature: Control endpoint активных Agent attempts
       And закрытый control endpoint удалён
       And Agent не запускался и durable run не изменился
 
-  @process @workflow:планирование @cli:сигналы-и-закрытие-терминала @format:agent-attempt-record
+  @process @cli:сигналы-и-закрытие-терминала @format:agent-attempt-record
   Rule: Один supervisor использует один защищённый volatile endpoint
     Все одновременные Agent attempts run используют один Unix socket с правами 600; fail-fast одного process закрывает его control context и завершает соседние process groups, а после штатного выхода endpoint удаляется и после crash следующий supervisor удаляет stale path и создаёт новый непереиспользуемый endpoint.
 

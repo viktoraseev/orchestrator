@@ -1,6 +1,6 @@
 Feature: Read-only workflow tooling
 
-  @workflow:validation @cli:validate
+  @cli:validate
   Rule: Bulk validate возвращает полный отчёт по source workflow catalog
 
     Scenario: Публичный API сохраняет valid и invalid результаты в сортированном отчёте
@@ -45,7 +45,7 @@ Feature: Read-only workflow tooling
       Then workflow tool завершается с кодом 3
       And workflow tool stdout пуст
 
-  @workflow:validation @cli:source-catalogs
+  @cli:source-catalogs
   Rule: Workflow graph проверяет только source topology
 
     Scenario: Typed graph сохраняет bootstrap, nodes и dependency edges
@@ -83,7 +83,7 @@ Feature: Read-only workflow tooling
       Then workflow tool завершается с кодом 3
       And workflow tool stdout пуст
 
-  @workflow:validation @format:materialized-workflow @cli:source-catalogs @cli:start
+  @format:materialized-workflow @cli:source-catalogs @cli:start
   Rule: Workflow plan показывает тот же кандидат, который подготовил бы start
     Validate, workflow plan и start используют общую полную materialization и graph validation boundary до создания данных run; plan возвращает typed кандидат до резервирования RunId, Run lock и durable publication.
 

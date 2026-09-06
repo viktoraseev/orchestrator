@@ -20,7 +20,7 @@ Feature: Резервирование и блокировка run
       Then lifecycle завершается с кодом 1
       And Agent не запускался и regular file run не изменился
 
-  @process @cli:resume @cli:коды-завершения @format:корень-состояния-и-layout @workflow:планирование
+  @process @cli:resume @cli:коды-завершения @format:корень-состояния-и-layout
   Rule: Один supervisor удерживает Run lock весь lifecycle
     Start или resume неблокирующе получает exclusive kernel lock до запуска executor и удерживает его между всеми Steps; competing supervisor получает код 5 без durable-изменений, а после exit или crash lock освобождается ядром.
 

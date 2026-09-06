@@ -950,6 +950,21 @@ fn human_workflow(world: &mut LifecycleWorld) {
     );
 }
 
+#[given("подготовлен workflow с двумя готовыми human Steps")]
+fn workflow_with_two_ready_human_steps(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: root\n    agent: main\n    prompt: null\n    human: false\n    depends-on: []\n    outputs: []\n  - id: first\n    agent: main\n    prompt: null\n    human: true\n    depends-on: [root]\n    outputs: []\n  - id: second\n    agent: main\n    prompt: null\n    human: true\n    depends-on: [root]\n    outputs: []\n",
+        None,
+    );
+    let root = world.root.as_ref().expect("scenario must define root");
+    fs::write(
+        root.path().join("config.yaml"),
+        "default-agent: main\nmax-parallel-agents: 2\nagents:\n  main:\n    type: codex\n    model: model\n    reasoning: high\n",
+    )
+    .expect("human order config must be written");
+}
+
 #[given("подготовлен workflow с human и non-human ветвями")]
 fn human_and_non_human_workflow(world: &mut LifecycleWorld) {
     prepare_graph(
@@ -998,6 +1013,21 @@ fn cyclic_workflow(world: &mut LifecycleWorld) {
         "steps:\n  - id: a\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [c]\n    outputs: [result]\n  - id: b\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [a]\n    outputs: [result]\n  - id: c\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [b]\n    outputs: [result]\n",
         None,
     );
+}
+
+#[given("подготовлен cycle с side dependency и внешним consumer")]
+fn mixed_cycle_workflow(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: a\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [c, side]\n    outputs: [forward]\n  - id: sink\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [c]\n    outputs: []\n  - id: b\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [a]\n    outputs: [bridge]\n  - id: side\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [a]\n    outputs: [context]\n  - id: c\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [b]\n    outputs: [feedback]\n",
+        None,
+    );
+    let root = world.root.as_ref().expect("scenario must define root");
+    fs::write(
+        root.path().join("config.yaml"),
+        "default-agent: main\nmax-parallel-agents: 1\nagents:\n  main:\n    type: codex\n    model: model\n    reasoning: high\n",
+    )
+    .expect("mixed cycle config must be written");
 }
 
 #[given("подготовлен durable run с частично удовлетворёнными dependency groups")]
@@ -1063,6 +1093,46 @@ fn durable_run_without_attempt_records(world: &mut LifecycleWorld) {
     );
 }
 
+#[given("подготовлен циклический durable run со старой input group")]
+fn cyclic_durable_run_with_stale_input(world: &mut LifecycleWorld) {
+    prepare_durable_run(
+        world,
+        "workflow-id: delivery\nmax-parallel-agents: 5\nsteps:\n- id: a\n  agent: &agent\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: [b]\n  outputs: [result]\n- id: b\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [a]\n  outputs: [result]\n",
+        &[
+            (
+                "0.a.attempt.yaml",
+                "input: []\nevents:\n- type: completed\n",
+            ),
+            (
+                "1.b.attempt.yaml",
+                "input:\n- 0\nevents:\n- type: completed\n",
+            ),
+            (
+                "2.a.attempt.yaml",
+                "input:\n- 1\nevents:\n- type: completed\n",
+            ),
+            (
+                "3.b.attempt.yaml",
+                "input:\n- 2\nevents:\n- type: completed\n",
+            ),
+            (
+                "4.a.attempt.yaml",
+                "input:\n- 1\nevents:\n- type: completed\n",
+            ),
+        ],
+    );
+    let directory = run_directory(world);
+    for name in [
+        "0.a.result.artifact",
+        "1.b.result.artifact",
+        "2.a.result.artifact",
+        "3.b.result.artifact",
+        "4.a.result.artifact",
+    ] {
+        fs::write(directory.join(name), name).expect("cycle artifact must be written");
+    }
+}
+
 fn prepare_satisfied_dependency_run(world: &mut LifecycleWorld, attempts: &[(&str, &str)]) {
     prepare_durable_run(
         world,
@@ -1111,6 +1181,27 @@ fn corrupt_durable_model(world: &mut LifecycleWorld, corruption: String) {
         "дополнительный completed artifact" => {
             fs::write(directory.join("0.source.extra.artifact"), b"extra")
                 .expect("extra artifact must be written");
+        }
+        "неполная input group" => {
+            fs::write(
+                directory.join("1.target.attempt.yaml"),
+                b"input: []\nevents:\n- type: completed\n",
+            )
+            .expect("incomplete input must be written");
+        }
+        "отсутствующий input source" => {
+            fs::write(
+                directory.join("1.target.attempt.yaml"),
+                b"input:\n- 99\nevents:\n- type: completed\n",
+            )
+            .expect("missing input source must be written");
+        }
+        "незавершённый input source" => {
+            fs::write(
+                directory.join("0.source.attempt.yaml"),
+                b"input: []\nevents: []\n",
+            )
+            .expect("unfinished input source must be written");
         }
         "противоречивый input" => {
             fs::write(
@@ -1468,6 +1559,19 @@ fn start_human_with_terminal(world: &mut LifecycleWorld) {
     run_start_with_terminal(world, [Behavior::CompleteEmpty], TerminalMode::Available);
 }
 
+#[when("human Steps планируются с доступным TTY")]
+fn schedule_human_steps_with_terminal(world: &mut LifecycleWorld) {
+    run_start_with_terminal(
+        world,
+        [
+            Behavior::CompleteEmpty,
+            Behavior::CompleteEmpty,
+            Behavior::ReturnWithoutCompletion,
+        ],
+        TerminalMode::Available,
+    );
+}
+
 #[when("human Agent активирует session human-session и выполняет /exit")]
 fn human_agent_user_exit(world: &mut LifecycleWorld) {
     run_start_with_terminal(
@@ -1744,6 +1848,37 @@ fn cycle_reaches_unfinished_repeated_a(world: &mut LifecycleWorld) {
                 input_id: "result".to_owned(),
                 bytes: b"c2".to_vec(),
             },
+            Behavior::ReturnWithoutCompletion,
+        ],
+    );
+}
+
+#[when("mixed cycle завершает повторный a и доходит до следующего незавершённого b")]
+fn mixed_cycle_reaches_next_unfinished_b(world: &mut LifecycleWorld) {
+    run_start(
+        world,
+        [
+            Behavior::Complete {
+                input_id: "forward".to_owned(),
+                bytes: b"a0".to_vec(),
+            },
+            Behavior::Complete {
+                input_id: "bridge".to_owned(),
+                bytes: b"b1".to_vec(),
+            },
+            Behavior::Complete {
+                input_id: "context".to_owned(),
+                bytes: b"side2".to_vec(),
+            },
+            Behavior::Complete {
+                input_id: "feedback".to_owned(),
+                bytes: b"c3".to_vec(),
+            },
+            Behavior::Complete {
+                input_id: "forward".to_owned(),
+                bytes: b"a4".to_vec(),
+            },
+            Behavior::CompleteEmpty,
             Behavior::ReturnWithoutCompletion,
         ],
     );
@@ -2820,6 +2955,45 @@ fn cycle_passes_fresh_artifacts(world: &mut LifecycleWorld) {
     );
 }
 
+#[then("mixed cycle создал attempts 0 a, 1 b, 2 side, 3 c, 4 a, 5 sink, 6 b, 7 side")]
+fn mixed_cycle_attempt_order(world: &mut LifecycleWorld) {
+    assert_eq!(
+        attempt_record_names(world),
+        [
+            "0.a.attempt.yaml",
+            "1.b.attempt.yaml",
+            "2.side.attempt.yaml",
+            "3.c.attempt.yaml",
+            "4.a.attempt.yaml",
+            "5.sink.attempt.yaml",
+            "6.b.attempt.yaml",
+            "7.side.attempt.yaml",
+        ]
+    );
+}
+
+#[then("повторный a получает feedback c и context side, а sink получает feedback c")]
+fn mixed_cycle_keeps_independent_inputs_and_outputs(world: &mut LifecycleWorld) {
+    let repeated_a = world
+        .calls
+        .iter()
+        .find(|call| call.step_id == "a" && call.attempt == 4)
+        .expect("repeated a must be called");
+    assert_eq!(
+        input_versions(repeated_a),
+        [
+            "c:feedback:3.c.feedback.artifact",
+            "side:context:2.side.context.artifact"
+        ]
+    );
+    let sink = world
+        .calls
+        .iter()
+        .find(|call| call.step_id == "sink")
+        .expect("external sink must be called");
+    assert_eq!(input_versions(sink), ["c:feedback:3.c.feedback.artifact"]);
+}
+
 #[then("lifecycle не сообщает о завершении run")]
 fn does_not_report_completed(world: &mut LifecycleWorld) {
     assert!(
@@ -3145,6 +3319,17 @@ fn human_attempt_unfinished(world: &mut LifecycleWorld) {
     let record = fs::read_to_string(run_directory(world).join("0.human-step.attempt.yaml"))
         .expect("human attempt must be readable");
     assert!(!record.contains("completed"));
+}
+
+#[then("human attempts запущены по порядку first, second")]
+fn human_attempts_follow_workflow_order(world: &mut LifecycleWorld) {
+    let human_calls: Vec<&str> = world
+        .calls
+        .iter()
+        .filter(|call| call.human)
+        .map(|call| call.step_id.as_str())
+        .collect();
+    assert_eq!(human_calls, ["first", "second"]);
 }
 
 #[then("resume продолжил attempt 0 с session human-session")]

@@ -55,7 +55,7 @@ Feature: Встроенные Agent types
       Then lifecycle завершается с кодом 0
       And был запущен default executable claude
 
-  @process @format:materialized-workflow @cli:config-get-config-set-и-config-list @cli:resume
+  @process @cli:config-get-config-set-и-config-list @cli:resume
   Rule: Run продолжает materialized Agent независимо от текущего config
     Step или default-agent выбирает именованный Agent только при materialization; его type, model и reasoning входят в durable workflow, поэтому последующее изменение config влияет только на новые runs.
 

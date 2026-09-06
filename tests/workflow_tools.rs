@@ -266,6 +266,7 @@ fn typed_plan(world: &mut WorkflowToolWorld) {
     let plan = world.plan.as_ref().expect("plan must exist");
     assert_eq!(plan.workflow_id(), "delivery");
     assert_eq!(plan.max_parallel_agents(), 7);
+    assert_eq!(plan.parameters(), ["mode"]);
     let agent = plan.steps()[0]
         .agent()
         .expect("Agent Step must contain Agent");
@@ -283,6 +284,20 @@ fn json_plan(world: &mut WorkflowToolWorld) {
     assert_eq!(value["steps"][0]["agent"]["type"], "codex");
     assert_eq!(value["steps"][0]["agent"]["model"], "gpt-test");
     assert_eq!(value["steps"][0]["prompt"], "SECRET PLAN");
+}
+
+#[then("JSON plan имеет закрытую Agent schema и только declarations parameters")]
+fn json_plan_has_closed_agent_schema(world: &mut WorkflowToolWorld) {
+    let value = world.json();
+    assert_eq!(value.as_object().map(serde_json::Map::len), Some(4));
+    assert_eq!(value["parameters"].as_array().map(Vec::len), Some(1));
+    assert_eq!(value["parameters"][0], "mode");
+    assert_eq!(value["steps"].as_array().map(Vec::len), Some(2));
+    for step in value["steps"].as_array().expect("steps must be an array") {
+        assert_eq!(step.as_object().map(serde_json::Map::len), Some(7));
+        assert_eq!(step["agent"].as_object().map(serde_json::Map::len), Some(3));
+        assert!(step["process"].is_null());
+    }
 }
 
 #[then("plan text содержит effective summaries без prompt content")]
@@ -341,7 +356,7 @@ fn prepare_materializable(root: &Path) {
     write_config(root);
     fs::write(
         root.join("workflow/delivery.yaml"),
-        "steps:\n  - id: plan\n    prompt: plan\n    human: false\n    depends-on: []\n    outputs: [spec]\n  - id: implement\n    prompt: implement\n    human: true\n    depends-on: [plan]\n    outputs: [source]\n",
+        "parameters:\n  mode: string\nsteps:\n  - id: plan\n    prompt: plan\n    human: false\n    depends-on: []\n    outputs: [spec]\n  - id: implement\n    prompt: implement\n    human: true\n    depends-on: [plan]\n    outputs: [source]\n",
     )
     .expect("workflow must be written");
     fs::write(root.join("prompt/plan.md"), "SECRET PLAN").expect("plan prompt must be written");

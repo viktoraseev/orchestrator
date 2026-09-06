@@ -1,19 +1,33 @@
 Feature: Durable lifecycle run
   Run — один сохраняемый запуск materialized workflow; attempts и artifacts образуют его durable-модель, а текущая позиция и состояние вычисляются из неё. Lifecycle создаёт и продолжает run только через подтверждённую durable-модель.
 
-  @cli:start @format:materialized-workflow @format:agent-attempt-record
+  @cli:start @format:agent-attempt-record
   Rule: Start обещает только durable run
     После общего preflight start резервирует и блокирует run, durable-публикует проверенный materialized workflow до initial attempt и запускает Agent только после обеих публикаций; возврат Agent process без принятого completion оставляет attempt незавершённым и завершает команду runtime failure без автоматического повторного запуска или native resume в этой lifecycle-команде.
-    Source workflow, prompts и Agents проверяются и materialize’ятся в памяти до создания run; опубликованный snapshot сохраняет порядок Steps для scheduling и не меняется вслед за source files.
+    До резервирования RunId source workflow, prompts и Agents materialize’ятся только в памяти; `spec.yaml` содержит ровно `workflow-id`, effective `max-parallel-agents`, mapping всех run parameters и Steps в source order, а каждый Agent Step — ровно `id`, materialized `agent`, точный `prompt` либо null, `human`, `process: null`, `depends-on` и `outputs`.
+    Durable snapshot не содержит AgentId, PromptId или ссылок на изменяемые config, workflow и prompt files, публикуется атомарно под фиксированным именем после получения Run lock и остаётся неизменным при resume.
 
     Scenario: Agent возвращает управление без completion
       Given подготовлен single-step workflow без outputs
       When workflow запускается через lifecycle API с возвратом без completion
       Then lifecycle завершается с кодом 1
       And до вызова Agent опубликованы spec и initial attempt 0
+      And durable spec содержит закрытую Agent Step schema без source references
       And RunId является десятичным Unix timestamp создания в миллисекундах
       And initial attempt остаётся незавершённым
       And Agent запускался ровно один раз
+
+    Scenario: Resume не перечитывает изменённые source definitions
+      Given подготовлен single-step workflow с prompt original
+      When start materialize'ит workflow, а source definitions изменяются перед resume
+      Then lifecycle завершается с кодом 1
+      And resume использует сохранённые Agent, prompt и topology, а spec неизменен
+
+    Scenario: NUL в run parameter отклоняется до публикации
+      Given подготовлен single-step workflow с обязательным parameter mode
+      When lifecycle API получает parameter mode с NUL
+      Then lifecycle завершается с кодом 3
+      And lifecycle run не создан
 
     @process
     Scenario: CLI печатает durable promise до преждевременного возврата process Agent

@@ -1,7 +1,7 @@
 # Форматы файлов orchestrator
 
-- Этот документ является источником требований к durable layout состояния, именам materialized run-файлов и их содержимому.
-- Контракт config, source workflow и prompt templates, а также семантика run, attempts и workflow graph определены в `features/*.feature`, а команды и наблюдаемое поведение CLI — в `cli.md`.
+- Этот документ является источником требований к durable layout состояния, Agent attempt records и artifacts.
+- Контракт config, source и materialized workflow, prompt templates, run, attempts и workflow graph определён в `features/*.feature`, а команды и наблюдаемое поведение CLI — в `cli.md`.
 
 ## Корень состояния и layout
 
@@ -23,21 +23,9 @@ run/<run-id>/<n>.<step-id>.<input-id>.artifact
 
 ## Общие правила YAML
 
-- `config.yaml`, materialized workflow и Agent attempt record являются YAML mappings.
+- `config.yaml` и Agent attempt record являются YAML mappings.
 - Повторяющиеся mapping keys и неизвестные описанной ниже схеме поля запрещены.
 - Нарушение схемы или формата ID делает файл невалидным; поведение использующей его команды определено в `cli.md`.
-
-## Materialized workflow
-
-- До резервирования RunId source workflow, Agents, prompt templates и эффективный `max-parallel-agents` materialize’ятся только в кандидат snapshot в памяти; после атомарного резервирования каталога run и получения Run lock команда `start` durable-публикует проверенный кандидат в YAML-файл `run/<run-id>/spec.yaml` с фиксированным именем.
-- Корневой mapping содержит ровно `workflow-id`, `max-parallel-agents`, `parameters` и `steps`; `parameters` хранит mapping всех объявленных ParameterIds в точные UTF-8 значения без NUL, выбранные `start`, включая пустые строки.
-
-- Каждый materialized Step содержит `id`, `human`, `depends-on`, `outputs`, `agent`, `prompt` и `process`; Agent Step хранит materialized `agent`, точный `prompt` либо `null` и `process: null`, Process Step хранит `agent: null`, `prompt: null` и Process mapping с абсолютными `executable` и `cwd`, неизменными `args` и `stdout`.
-
-- Materialization добавляет `workflow-id`, effective parameters и `max-parallel-agents`, заменяет ссылки `agent` и `prompt` их значениями, разрешает Process executable и cwd и сериализует кандидат как YAML без записи в run; Process argv placeholders до запуска attempt сохраняются неизменными.
-- Materialized workflow не содержит AgentId, PromptId или ссылок на изменяемые config, workflow и prompt files.
-- JSON workflow plan представляет validated кандидат без runtime parameter values с snake_case полями `workflow_id`, `max_parallel_agents`, `parameters` и `steps`; `parameters` содержит ParameterIds, каждый Step содержит nullable `agent`, nullable `prompt`, nullable Process object `{executable,args,cwd,stdout}`, `human`, `depends_on` и `outputs`, но этот object не является durable-файлом.
-- Durable-публикация `spec.yaml` выполняется атомарно после резервирования run и до публикации первого Agent attempt; после публикации файл неизменяем.
 
 ## Agent attempt record
 

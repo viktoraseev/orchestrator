@@ -58,6 +58,11 @@ fn start_with_spaced_parameter(world: &mut ProcessWorld) {
     run_cli(world, &["start", "delivery", "--param", "mode=fast mode"]);
 }
 
+#[when("start получает пустой parameter mode")]
+fn start_with_empty_parameter(world: &mut ProcessWorld) {
+    run_cli(world, &["start", "delivery", "--param", "mode="]);
+}
+
 #[then(
     "Process получает ровно шесть argv: --mode, fast mode, --input, absolute input path, --output, absolute output path"
 )]
@@ -160,6 +165,47 @@ fn parameter_is_materialized(world: &mut ProcessWorld) {
     let spec =
         fs::read_to_string(run_directory(world).join("spec.yaml")).expect("spec must be readable");
     assert!(spec.contains("mode: fast mode"));
+}
+
+#[then("durable Process Steps содержат закрытую schema и неизменные argv templates")]
+fn durable_process_steps_have_closed_schema(world: &mut ProcessWorld) {
+    let spec: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(run_directory(world).join("spec.yaml")).expect("spec must be readable"),
+    )
+    .expect("spec must be YAML");
+    let steps = spec["steps"]
+        .as_sequence()
+        .expect("steps must be a sequence");
+    assert_eq!(steps.len(), 2);
+    for step in steps {
+        assert_eq!(step.as_mapping().map(serde_yaml::Mapping::len), Some(7));
+        assert!(step["agent"].is_null());
+        assert!(step["prompt"].is_null());
+        let process = &step["process"];
+        assert_eq!(process.as_mapping().map(serde_yaml::Mapping::len), Some(4));
+        assert!(
+            Path::new(
+                process["executable"]
+                    .as_str()
+                    .expect("executable must be a string")
+            )
+            .is_absolute()
+        );
+        assert!(Path::new(process["cwd"].as_str().expect("cwd must be a string")).is_absolute());
+        assert!(process["stdout"].is_null());
+    }
+    assert_eq!(steps[1]["process"]["args"][1], "{{param:mode}}");
+    assert_eq!(steps[1]["process"]["args"][3], "{{path:produce:source}}");
+    assert_eq!(steps[1]["process"]["args"][5], "{{output:result}}");
+}
+
+#[then("materialized workflow содержит пустое значение parameter mode")]
+fn empty_parameter_is_materialized(world: &mut ProcessWorld) {
+    let spec: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(run_directory(world).join("spec.yaml")).expect("spec must be readable"),
+    )
+    .expect("spec must be YAML");
+    assert_eq!(spec["parameters"]["mode"].as_str(), Some(""));
 }
 
 #[given("подготовлен workflow с обязательным parameter mode")]
@@ -406,6 +452,11 @@ fn plan_process_workflow(world: &mut ProcessWorld) {
     );
 }
 
+#[when("запускается orchestrator workflow plan delivery в JSON")]
+fn plan_process_workflow_json(world: &mut ProcessWorld) {
+    run_cli(world, &["workflow", "plan", "delivery", "--format", "json"]);
+}
+
 #[then("source Process сохраняет executable и argv")]
 fn source_process_is_preserved(world: &mut ProcessWorld) {
     let source = world.source.as_ref().expect("source must exist");
@@ -434,6 +485,33 @@ fn plan_has_canonical_relative_process_paths(world: &mut ProcessWorld) {
         .expect("tools directory must be canonicalizable");
     assert_eq!(Path::new(process.cwd()), tools);
     assert_eq!(Path::new(process.executable()), tools.join("runner.sh"));
+}
+
+#[then("Process plan JSON содержит declarations и materialized executor")]
+fn process_plan_json_has_closed_schema(world: &mut ProcessWorld) {
+    assert_eq!(world.observed().code, 0, "{}", world.observed().stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(&world.observed().stdout).expect("plan must be JSON");
+    assert_eq!(value.as_object().map(serde_json::Map::len), Some(4));
+    assert_eq!(value["parameters"].as_array().map(Vec::len), Some(1));
+    assert_eq!(value["parameters"][0], "mode");
+    let step = &value["steps"][0];
+    assert_eq!(step.as_object().map(serde_json::Map::len), Some(7));
+    assert!(step["agent"].is_null());
+    assert!(step["prompt"].is_null());
+    let process = &step["process"];
+    assert_eq!(process.as_object().map(serde_json::Map::len), Some(4));
+    assert!(
+        Path::new(
+            process["executable"]
+                .as_str()
+                .expect("executable must be a string")
+        )
+        .is_absolute()
+    );
+    assert!(Path::new(process["cwd"].as_str().expect("cwd must be a string")).is_absolute());
+    assert_eq!(process["args"][0], "{{param:mode}}");
+    assert!(process["stdout"].is_null());
 }
 
 #[given("подготовлен Process Step завершающийся успешно со второго запуска")]

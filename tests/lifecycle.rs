@@ -1,6 +1,6 @@
 //! Cucumber-проверка публичного lifecycle API и process-контрактов lifecycle CLI.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -907,6 +907,24 @@ fn workflow_without_outputs(world: &mut LifecycleWorld) {
     prepare_workflow(world, &[]);
 }
 
+#[given("подготовлен single-step workflow с prompt original")]
+fn workflow_with_original_prompt(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: first\n    agent: main\n    prompt: stable\n    human: false\n    depends-on: []\n    outputs: []\n",
+        Some(("stable", "ORIGINAL")),
+    );
+}
+
+#[given("подготовлен single-step workflow с обязательным parameter mode")]
+fn workflow_with_required_parameter(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "parameters:\n  mode: string\nsteps:\n  - id: first\n    agent: main\n    prompt: null\n    human: false\n    depends-on: []\n    outputs: []\n",
+        None,
+    );
+}
+
 #[given("путь run занят regular file")]
 fn run_path_is_regular_file(world: &mut LifecycleWorld) {
     let root = world.root.as_ref().expect("scenario must define root");
@@ -1532,6 +1550,54 @@ fn completed_run(world: &mut LifecycleWorld) {
 #[when("workflow запускается через lifecycle API с возвратом без completion")]
 fn start_without_completion(world: &mut LifecycleWorld) {
     run_start(world, [Behavior::ReturnWithoutCompletion]);
+}
+
+#[when("start materialize'ит workflow, а source definitions изменяются перед resume")]
+fn resume_after_source_definitions_change(world: &mut LifecycleWorld) {
+    run_start(world, [Behavior::ReturnWithoutCompletion]);
+    assert_eq!(
+        world.observed().exit_code,
+        1,
+        "{:?}",
+        world.observed().error
+    );
+    let spec = fs::read(run_directory(world).join("spec.yaml")).expect("spec must be readable");
+    world.durable_snapshot = vec![("spec.yaml".to_owned(), spec)];
+    let root = world.root.as_ref().expect("scenario must define root");
+    fs::write(root.path().join("config.yaml"), "unknown: true\n")
+        .expect("changed config must be written");
+    fs::write(root.path().join("workflow/delivery.yaml"), "steps: []\n")
+        .expect("changed workflow must be written");
+    fs::write(root.path().join("prompt/stable.md"), "CHANGED")
+        .expect("changed prompt must be written");
+    let (observed, calls) = resume_with_fake(world, [Behavior::ReturnWithoutCompletion]);
+    world.observed = Some(observed);
+    world.calls = calls;
+}
+
+#[when("lifecycle API получает parameter mode с NUL")]
+fn start_with_nul_parameter(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let registry = FakeAgentRegistry::new(root.path().to_owned(), []);
+    let command = LifecycleCommand::start_explicit_with_parameters(
+        "delivery",
+        BTreeMap::from([("mode".to_owned(), "before\0after".to_owned())]),
+    )
+    .expect("workflow ID must be valid");
+    let mut reporter = VecReporter::default();
+    let result = execute_lifecycle(
+        &command,
+        &environment(root),
+        TerminalMode::Unavailable,
+        &LifecycleSignals::default(),
+        &registry,
+        &mut reporter,
+    );
+    world.calls = registry
+        .calls
+        .into_inner()
+        .expect("call log must be available");
+    world.observed = Some(observe(result, reporter));
 }
 
 #[when("workflow запускается через lifecycle API с Agent type без native resume")]
@@ -2529,6 +2595,33 @@ fn durable_before_agent(world: &mut LifecycleWorld) {
         "{:?}",
         world.observed().error
     );
+}
+
+#[then("durable spec содержит закрытую Agent Step schema без source references")]
+fn durable_spec_has_closed_agent_schema(world: &mut LifecycleWorld) {
+    let actual: serde_yaml::Value = serde_yaml::from_slice(
+        &fs::read(run_directory(world).join("spec.yaml")).expect("spec must be readable"),
+    )
+    .expect("spec must be YAML");
+    let expected: serde_yaml::Value = serde_yaml::from_str(
+        "workflow-id: delivery\nmax-parallel-agents: 5\nparameters: {}\nsteps:\n  - id: first\n    agent:\n      type: codex\n      model: model\n      reasoning: high\n    prompt: null\n    human: false\n    process: null\n    depends-on: []\n    outputs: []\n",
+    )
+    .expect("expected spec must be YAML");
+    assert_eq!(actual, expected);
+}
+
+#[then("resume использует сохранённые Agent, prompt и topology, а spec неизменен")]
+fn resume_uses_materialized_source_snapshot(world: &mut LifecycleWorld) {
+    assert_eq!(world.calls.len(), 1);
+    assert_eq!(world.calls[0].step_id, "first");
+    assert_eq!(world.calls[0].prompt, "ORIGINAL");
+    let expected = &world
+        .durable_snapshot
+        .first()
+        .expect("original spec must be captured")
+        .1;
+    let actual = fs::read(run_directory(world).join("spec.yaml")).expect("spec must be readable");
+    assert_eq!(&actual, expected);
 }
 
 #[then("initial attempt остаётся незавершённым")]

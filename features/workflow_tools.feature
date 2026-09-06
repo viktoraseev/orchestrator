@@ -83,9 +83,10 @@ Feature: Read-only workflow tooling
       Then workflow tool завершается с кодом 3
       And workflow tool stdout пуст
 
-  @format:materialized-workflow @cli:source-catalogs @cli:start
+  @cli:source-catalogs @cli:start
   Rule: Workflow plan показывает тот же кандидат, который подготовил бы start
     Validate, workflow plan и start используют общую полную materialization и graph validation boundary до создания данных run; plan возвращает typed кандидат до резервирования RunId, Run lock и durable publication.
+    JSON plan содержит ровно snake_case поля `workflow_id`, `max_parallel_agents`, `parameters` и `steps`; parameters перечисляет ParameterIds без runtime values, каждый Step содержит `id`, nullable `agent`, nullable `prompt`, nullable `process`, `human`, `depends_on` и `outputs`, а Agent object — только `type`, `model` и `reasoning`.
 
     Scenario: Typed plan содержит effective Agent, prompt и parallel limit
       Given подготовлен полностью materializable workflow delivery
@@ -100,6 +101,7 @@ Feature: Read-only workflow tooling
       When запускается orchestrator workflow plan delivery в JSON
       Then workflow tool завершается с кодом 0
       And JSON plan содержит effective limit Agent и prompt
+      And JSON plan имеет закрытую Agent schema и только declarations parameters
 
     @process
     Scenario: Workflow plan text не раскрывает prompt content

@@ -584,6 +584,9 @@ struct FakeAgentRegistry {
     calls: Mutex<Vec<Call>>,
 }
 
+#[derive(Debug)]
+struct NoNativeResumeRegistry;
+
 impl FakeAgentRegistry {
     fn new(root: PathBuf, behaviors: impl IntoIterator<Item = Behavior>) -> Self {
         Self {
@@ -678,6 +681,20 @@ impl AgentRegistry for FakeAgentRegistry {
             }
         }
         Ok(AgentExit::Returned(0))
+    }
+}
+
+impl AgentRegistry for NoNativeResumeRegistry {
+    fn validate(&self, _type_id: &str, _model: &str, _reasoning: &str) -> Result<(), String> {
+        Err("Agent type не поддерживает native resume".to_owned())
+    }
+
+    fn run(
+        &self,
+        _request: &AgentRunRequest<'_>,
+        _control: &mut dyn AttemptControl,
+    ) -> Result<AgentExit, String> {
+        panic!("Agent без native resume не должен запускаться")
     }
 }
 
@@ -800,6 +817,15 @@ fn workflow_without_outputs(world: &mut LifecycleWorld) {
 #[given("подготовлен single-step workflow с output result")]
 fn workflow_with_output(world: &mut LifecycleWorld) {
     prepare_workflow(world, &["result"]);
+}
+
+#[given("подготовлен незавершённый run без session activations")]
+fn unfinished_run_without_session(world: &mut LifecycleWorld) {
+    prepare_workflow(world, &[]);
+    run_start(world, [Behavior::ReturnWithoutCompletion]);
+    world.calls.clear();
+    world.observed = None;
+    world.durable_snapshot = durable_snapshot(world);
 }
 
 #[given("подготовлен single-step human workflow")]
@@ -1184,6 +1210,21 @@ fn completed_run(world: &mut LifecycleWorld) {
 #[when("workflow запускается через lifecycle API с возвратом без completion")]
 fn start_without_completion(world: &mut LifecycleWorld) {
     run_start(world, [Behavior::ReturnWithoutCompletion]);
+}
+
+#[when("workflow запускается через lifecycle API с Agent type без native resume")]
+fn start_without_native_resume_support(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let mut reporter = VecReporter::default();
+    let result = execute_lifecycle(
+        &LifecycleCommand::start_explicit("delivery").expect("workflow ID must be valid"),
+        &environment(root),
+        TerminalMode::Unavailable,
+        &LifecycleSignals::default(),
+        &NoNativeResumeRegistry,
+        &mut reporter,
+    );
+    world.observed = Some(observe(result, reporter));
 }
 
 #[when("human workflow запускается без TTY")]
@@ -1795,6 +1836,44 @@ fn resume_run(world: &mut LifecycleWorld) {
     world.observed = Some(observe(result, reporter));
 }
 
+#[when("run продолжается с Agent type без native resume")]
+fn resume_without_native_resume_support(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let run_id = world.run_id.as_ref().expect("scenario must define run ID");
+    let command =
+        LifecycleCommand::Resume(orchestrator::RunId::parse(run_id).expect("run ID must be valid"));
+    let mut reporter = VecReporter::default();
+    let result = execute_lifecycle(
+        &command,
+        &environment(root),
+        TerminalMode::Unavailable,
+        &LifecycleSignals::default(),
+        &NoNativeResumeRegistry,
+        &mut reporter,
+    );
+    world.observed = Some(observe(result, reporter));
+}
+
+#[when("запускается orchestrator resume без RunId")]
+fn resume_without_run_id(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let output = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .arg("resume")
+        .env("ORC_HOME", root.path())
+        .output()
+        .expect("orchestrator resume must run");
+    world.observed = Some(Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines: String::from_utf8(output.stdout)
+            .expect("stdout must be UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    });
+}
+
 #[when("run после signal shutdown продолжается и завершается")]
 fn resume_after_signal_shutdown(world: &mut LifecycleWorld) {
     let root = world.root.as_ref().expect("scenario must define root");
@@ -1860,6 +1939,17 @@ fn attempt_unfinished(world: &mut LifecycleWorld) {
     let text = fs::read_to_string(run_directory(world).join("0.first.attempt.yaml"))
         .expect("attempt record must be readable");
     assert!(!text.contains("completed"));
+}
+
+#[then("Agent запускался ровно один раз")]
+fn agent_started_once(world: &mut LifecycleWorld) {
+    assert_eq!(world.calls.len(), 1);
+}
+
+#[then("lifecycle run не создан")]
+fn lifecycle_run_was_not_created(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    assert!(!root.path().join("run").exists());
 }
 
 #[then("competing resume не изменяет initial attempt")]
@@ -1933,6 +2023,23 @@ fn resumed_same_attempt(world: &mut LifecycleWorld) {
     );
 }
 
+#[then("resume запускает тот же attempt 0 без session activation")]
+fn resumed_same_attempt_without_session(world: &mut LifecycleWorld) {
+    assert_eq!(
+        world.calls,
+        vec![Call {
+            step_id: "first".to_owned(),
+            attempt: 0,
+            resume_session: None,
+            inputs: Vec::new(),
+            prompt: String::new(),
+            human: false,
+        }],
+        "{:?}",
+        world.observed().error
+    );
+}
+
 #[then("durable activations равны vendor/a:1, vendor/b:2, vendor/a:1")]
 fn durable_opaque_activations(world: &mut LifecycleWorld) {
     let text = fs::read_to_string(run_directory(world).join("0.first.attempt.yaml"))
@@ -1942,6 +2049,15 @@ fn durable_opaque_activations(world: &mut LifecycleWorld) {
         .filter_map(|line| line.strip_prefix("  session-id: "))
         .collect();
     assert_eq!(sessions, ["vendor/a:1", "vendor/b:2", "vendor/a:1"]);
+}
+
+#[then("durable activations не содержат вид create, resume или fork")]
+fn durable_activations_have_no_origin_kind(world: &mut LifecycleWorld) {
+    let text = fs::read_to_string(run_directory(world).join("0.first.attempt.yaml"))
+        .expect("attempt record must be readable");
+    assert!(!text.contains("create"));
+    assert!(!text.contains("resume"));
+    assert!(!text.contains("fork"));
 }
 
 #[then("RunId является десятичным Unix timestamp создания в миллисекундах")]

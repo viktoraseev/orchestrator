@@ -1,9 +1,10 @@
 //! Cucumber-проверка Process executor, run parameters и process recovery.
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use cucumber::{World, given, then, when};
 use orchestrator::{
@@ -111,6 +112,47 @@ fn process_output_is_artifact(world: &mut ProcessWorld) {
         fs::read_to_string(artifact).expect("artifact must be readable"),
         "fast mode:source bytes"
     );
+}
+
+#[given("подготовлен Process Step проверяющий non-interactive streams")]
+fn process_checking_streams(world: &mut ProcessWorld) {
+    let root = prepare_root(world);
+    let executable = executable(
+        root,
+        "streams.sh",
+        "#!/bin/sh\nset -eu\nif IFS= read -r unexpected; then exit 8; fi\nprintf 'process stdout\\n'\nprintf 'process stderr\\n' >&2\n",
+    );
+    write_process_workflow(root, &executable, "[]", "[]");
+}
+
+#[when("workflow с Process Step запускается с данными в stdin supervisor")]
+fn start_process_with_supervisor_stdin(world: &mut ProcessWorld) {
+    let root = world.root().to_owned();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["start", "delivery"])
+        .env("ORC_HOME", &root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("orchestrator must start");
+    child
+        .stdin
+        .take()
+        .expect("orchestrator stdin must be piped")
+        .write_all(b"must not reach Process\n")
+        .expect("supervisor stdin must accept test bytes");
+    let output = child
+        .wait_with_output()
+        .expect("orchestrator must finish normally");
+    capture_output(world, output);
+}
+
+#[then("Process завершился без stdin и его stdout и stderr наблюдаемы")]
+fn process_inherits_output_streams(world: &mut ProcessWorld) {
+    assert_eq!(world.observed().code, 0, "{}", world.observed().stderr);
+    assert!(world.observed().stdout.contains("process stdout\n"));
+    assert!(world.observed().stderr.contains("process stderr\n"));
 }
 
 #[then("materialized workflow содержит точное значение parameter")]
@@ -326,14 +368,21 @@ fn succeeds_on_second_run(world: &mut ProcessWorld) {
     let executable = executable(
         root,
         "retry.sh",
-        "#!/bin/sh\nset -eu\ncount=0\nif [ -f \"$ORC_HOME/count\" ]; then count=$(/bin/cat \"$ORC_HOME/count\"); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$ORC_HOME/count\"\nif [ \"$count\" -eq 1 ]; then exit 9; fi\n",
+        "#!/bin/sh\nset -eu\ncount=0\nif [ -f \"$ORC_HOME/count\" ]; then count=$(/bin/cat \"$ORC_HOME/count\"); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$ORC_HOME/count\"\nprintf '%s' \"$0\" > \"$ORC_HOME/executable.$count\"\nprintf '%s' \"$PWD\" > \"$ORC_HOME/cwd.$count\"\nprintf '%s' \"$2\" > \"$ORC_HOME/parameter.$count\"\nprintf '%s' \"$ORC_INPUT\" > \"$ORC_HOME/input.$count\"\nprintf 'attempt %s' \"$count\" > \"$1\"\nif [ \"$count\" -eq 1 ]; then exit 9; fi\n",
     );
-    write_process_workflow(root, &executable, "[]", "[]");
+    fs::write(
+        root.join("workflow/delivery.yaml"),
+        format!(
+            "parameters:\n  mode: string\nsteps:\n  - id: execute\n    process:\n      executable: {}\n      args: [\"{{{{output:result}}}}\", \"{{{{param:mode}}}}\"]\n    human: false\n    depends-on: []\n    outputs: [result]\n",
+            executable.display()
+        ),
+    )
+    .expect("workflow must be written");
 }
 
 #[when("start запускает Process первый раз")]
 fn first_process_run(world: &mut ProcessWorld) {
-    run_cli(world, &["start", "delivery"]);
+    run_cli(world, &["start", "delivery", "--param", "mode=stable"]);
 }
 
 #[then("команда завершается runtime error и attempt не завершён")]
@@ -342,6 +391,22 @@ fn runtime_incomplete(world: &mut ProcessWorld) {
     let record = fs::read_to_string(run_directory(world).join("0.execute.attempt.yaml"))
         .expect("attempt must be readable");
     assert!(!record.contains("completed"));
+    assert!(
+        !run_directory(world)
+            .join("0.execute.result.artifact")
+            .exists()
+    );
+}
+
+#[then("exit code Process не записан и автоматический restart не выполнен")]
+fn process_exit_is_not_durable_or_retried(world: &mut ProcessWorld) {
+    let record = fs::read_to_string(run_directory(world).join("0.execute.attempt.yaml"))
+        .expect("attempt must be readable");
+    assert!(!record.contains("exit"));
+    assert_eq!(
+        fs::read_to_string(world.root().join("count")).expect("count must exist"),
+        "1"
+    );
 }
 
 #[when("run явно продолжается")]
@@ -360,10 +425,38 @@ fn process_ran_twice(world: &mut ProcessWorld) {
     assert!(!run_directory(world).join("1.execute.attempt.yaml").exists());
 }
 
+#[then("оба запуска получили одинаковые executable, cwd, parameter и durable input mapping")]
+fn retried_process_uses_same_materialized_input(world: &mut ProcessWorld) {
+    for field in ["executable", "cwd", "parameter", "input"] {
+        let first = fs::read(world.root().join(format!("{field}.1")))
+            .expect("first invocation field must be readable");
+        let second = fs::read(world.root().join(format!("{field}.2")))
+            .expect("second invocation field must be readable");
+        assert_eq!(first, second, "{field} changed between Process invocations");
+    }
+    assert_eq!(
+        fs::read_to_string(world.root().join("parameter.2")).expect("parameter must be readable"),
+        "stable"
+    );
+}
+
+#[then("Process attempt не содержит session activation")]
+fn process_attempt_has_no_session_activation(world: &mut ProcessWorld) {
+    let record = fs::read_to_string(run_directory(world).join("0.execute.attempt.yaml"))
+        .expect("attempt must be readable");
+    assert!(!record.contains("session-activated"));
+    assert!(!record.contains("session-id"));
+}
+
 #[then("run завершён")]
 fn run_completed(world: &mut ProcessWorld) {
     assert_eq!(world.observed().code, 0, "{}", world.observed().stderr);
     assert!(world.observed().stdout.contains(": completed"));
+    assert_eq!(
+        fs::read_to_string(run_directory(world).join("0.execute.result.artifact"))
+            .expect("artifact must be readable"),
+        "attempt 2"
+    );
 }
 
 #[given("подготовлен Process Step не создающий объявленный output")]
@@ -371,6 +464,13 @@ fn missing_output_process(world: &mut ProcessWorld) {
     let root = prepare_root(world);
     let executable = executable(root, "no-output.sh", "#!/bin/sh\nexit 0\n");
     write_process_workflow(root, &executable, "[]", "[result]");
+}
+
+#[given("подготовлен Process Step создающий directory вместо output")]
+fn directory_output_process(world: &mut ProcessWorld) {
+    let root = prepare_root(world);
+    let executable = executable(root, "directory-output.sh", "#!/bin/sh\nmkdir \"$1\"\n");
+    write_process_workflow(root, &executable, "[\"{{output:result}}\"]", "[result]");
 }
 
 #[given("подготовлен Process Step направляющий stdout в output")]
@@ -434,6 +534,11 @@ fn run_cli(world: &mut ProcessWorld, args: &[&str]) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orchestrator"));
     command.args(args).env("ORC_HOME", &root);
     let output = command.output().expect("orchestrator must run");
+    capture_output(world, output);
+}
+
+fn capture_output(world: &mut ProcessWorld, output: std::process::Output) {
+    let root = world.root().to_owned();
     world.outcome = Some(Observed {
         code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8(output.stdout).expect("stdout must be UTF-8"),

@@ -43,6 +43,7 @@ Feature: Validation workflow
 
   @workflow:validation @format:config-yaml
   Rule: Каждый Step получает совместимого Agent с native resume
+    Agent type без поддержки native resume отклоняется тем же preflight при validate и start; материализованный run повторно проверяется при resume без fallback на новую session.
 
     Scenario Outline: Невалидный выбор Agent отклоняется
       Given подготовлен кандидат workflow "<candidate>"

@@ -3,6 +3,7 @@ Feature: Durable lifecycle run
 
   @cli:start @format:materialized-workflow @format:agent-attempt-record @spec:сущности @workflow:initial-activation-dependencies-и-frontier
   Rule: Start обещает только durable run
+    Возврат Agent process без принятого completion оставляет attempt незавершённым и завершает команду runtime failure; автоматического повторного запуска или native resume в этой lifecycle-команде нет.
 
     Scenario: Agent возвращает управление без completion
       Given подготовлен single-step workflow без outputs
@@ -11,6 +12,7 @@ Feature: Durable lifecycle run
       And до вызова Agent опубликованы spec и initial attempt 0
       And RunId является десятичным Unix timestamp создания в миллисекундах
       And initial attempt остаётся незавершённым
+      And Agent запускался ровно один раз
 
     @process
     Scenario: CLI печатает durable promise до преждевременного возврата process Agent
@@ -29,8 +31,38 @@ Feature: Durable lifecycle run
       Then lifecycle завершается с кодом 5
       And competing resume не изменяет initial attempt
 
-  @cli:resume @format:agent-attempt-record @spec:native-resume @spec:control-endpoint-и-события
+    Scenario: Несовместимый Agent type отклоняется до создания run
+      Given подготовлен single-step workflow без outputs
+      When workflow запускается через lifecycle API с Agent type без native resume
+      Then lifecycle завершается с кодом 3
+      And lifecycle run не создан
+
+  @cli:resume
+  Rule: Resume требует явный RunId
+    Resume без RunId не выбирает последний run и отклоняется CLI parser; неизвестный явно указанный RunId не создаёт run.
+
+    @process
+    Scenario: Resume без RunId не продолжает существующий run
+      Given подготовлен незавершённый run без session activations
+      When запускается orchestrator resume без RunId
+      Then lifecycle завершается с кодом 2
+      And Agent не запускался и durable run не изменился
+
+    Scenario: Неизвестный run не создаётся при resume
+      Given подготовлен корень без runs
+      When неизвестный run 404 продолжается через lifecycle API
+      Then lifecycle завершается с кодом 4
+      And каталог неизвестного run не создан
+
+  @cli:resume @format:agent-attempt-record @spec:control-endpoint-и-события
   Rule: Session activation сохраняется в durable-порядке
+    Явный resume продолжает тот же attempt с последней Agent session activation в durable-порядке независимо от create, resume или fork; без activation Agent type создаёт новую внутреннюю session для того же attempt и номера.
+
+    Scenario: Resume без activation продолжает тот же attempt с новой session
+      Given подготовлен незавершённый run без session activations
+      When run продолжается через lifecycle API
+      Then lifecycle завершается с кодом 1
+      And resume запускает тот же attempt 0 без session activation
 
     Scenario: Resume использует последнюю отличающуюся непрозрачную native session
       Given подготовлен single-step workflow без outputs
@@ -38,6 +70,7 @@ Feature: Durable lifecycle run
       And run продолжается через lifecycle API
       Then resume запускает тот же attempt 0 с session vendor/a:1
       And durable activations равны vendor/a:1, vendor/b:2, vendor/a:1
+      And durable activations не содержат вид create, resume или fork
 
     @process
     Scenario: Process Agent сохраняет session через дочернюю CLI-команду
@@ -54,14 +87,19 @@ Feature: Durable lifecycle run
       Then lifecycle завершается с кодом 0
       And attempt завершён terminal event completed
 
-    Scenario: Неизвестный run не создаётся при resume
-      Given подготовлен корень без runs
-      When неизвестный run 404 продолжается через lifecycle API
-      Then lifecycle завершается с кодом 4
-      And каталог неизвестного run не создан
+  @cli:resume @workflow:validation
+  Rule: Resume не заменяет несовместимый Agent type новой session
+    Потеря поддержки native resume материализованным Agent type завершает resume fail-fast до запуска Agent и без интерактивных вопросов; fallback на новую session запрещён.
+
+    Scenario: Существующий run отклоняется до запуска несовместимого Agent
+      Given подготовлен незавершённый run без session activations
+      When run продолжается с Agent type без native resume
+      Then lifecycle завершается с кодом 3
+      And Agent не запускался и durable run не изменился
 
   @cli:session-activate-и-attempt-complete @cli:вывод-команд @format:artifact @format:agent-attempt-record @spec:публикация-artifacts-и-completion @workflow:циклы-terminal-и-blocked-run
   Rule: Completion становится durable только после возврата Agent
+    После возврата Agent последний принятый completion-кандидат финализируется независимо от exit code; без кандидата terminal event не добавляется, и attempt доступен только последующему явному resume.
 
     Scenario: Single-step run публикует artifact и завершается
       Given подготовлен single-step workflow с output result

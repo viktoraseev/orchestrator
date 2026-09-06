@@ -95,7 +95,7 @@ Feature: Встроенные Agent types
       Then lifecycle завершается с кодом 0
       And process Agent получил точные resume args для claude
 
-  @process @spec:сущности @spec:native-resume @cli:вывод-команд
+  @process @spec:сущности @cli:вывод-команд
   Rule: Human adapters напрямую занимают TTY и активируют session через hook
     Codex start использует `--model model --config model_reasoning_effort="high" <prompt>`, Codex resume добавляет начальный `resume` и session ID; Claude использует `--model model --effort high [--resume <session-id>] <prompt>`.
 
@@ -112,7 +112,7 @@ Feature: Встроенные Agent types
         | codex  |
         | claude |
 
-  @process @spec:сущности @spec:native-resume @spec:главный-workflow @cli:вывод-команд
+  @process @spec:сущности @spec:главный-workflow @cli:вывод-команд
   Rule: Обязательный session event интерпретируется fail-fast
     Codex требует `{"type":"thread.started","thread_id":"<session-id>"}`, а Claude — `{"type":"system","subtype":"init","session_id":"<session-id>"}`; повтор ID идемпотентен, другой ID противоречив, отсутствие события и невалидный JSON ошибочны, неизвестный валидный event игнорируется.
 

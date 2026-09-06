@@ -22,30 +22,6 @@ workflow. Выполнение сохраняется как run: его мож�
 - **Artifact** — версионируемый сформированный результат с durable-ключом `(attempt-n, step-id, input-id)`. Правила его использования графом заданы в `workflow.spec.md`, а файловый формат — в `format.spec.md`. Artifact входит в durable-модель и становится доступен графу и неизменяем только при финализации последнего кандидата completion после возврата процесса агента.
 - **Run lock** — эксклюзивная блокировка одного run. Пока её удерживает процесс `orchestrator`, второй процесс не может запустить тот же run; разные runs могут выполняться одновременно. Блокировка ядра берётся на lock-файле из `format.spec.md`; наличие файла само по себе не означает активность.
 
-## Native resume
-
-Продолжение run выполняется только явно с обязательным RunId; implicit resume
-последнего run не поддерживается. Точный CLI-контракт задан в `cli.md`. После
-выхода процесса без completion event orchestrator не запускает тот же attempt
-повторно в рамках текущей команды.
-
-При явном resume незавершённый attempt продолжает ту же внутреннюю сессию,
-которая указана последней Agent session activation в durable-порядке
-Agent attempt record. Причина её появления — create, resume или fork — не
-сохраняется и не даёт ей отдельного приоритета. Если activations нет, Agent type
-создаёт новую внутреннюю сессию для того же attempt и того же `n`.
-
-Fallback с native resume на новую сессию запрещён. Agent type без поддержки
-native resume отклоняется при `validate` и `start`; если такая несовместимость
-обнаружена при `resume` существующего run, команда завершается fail-fast до
-запуска агента и без интерактивных вопросов.
-
-Process Step не имеет native session и не создаёт session activation. Если его attempt остался без `completed`, последующий явный `resume` повторно запускает тот же materialized executable с теми же cwd, параметрами и разрешёнными из durable input mapping аргументами; это at-least-once execution, поэтому внешние side effects Process обязаны быть идемпотентными.
-
-Ненулевой exit code процесса не сохраняется в Agent attempt record и до входа supervisor в user shutdown fail-fast завершает текущую команду: новые attempts и автоматический native resume не запускаются. В user shutdown возврат одного из уже работающих non-human процессов не прерывает ожидание остальных. При возврате процесса наличие последнего принятого кандидата completion определяет состояние attempt независимо от exit code: кандидат финализируется терминальным событием `completed`, а без кандидата durable-событие не добавляется и attempt может быть продолжен только последующим явным `orchestrator resume <run-id>`.
-
-Human attempt запускается только с TTY lifecycle-команды, который процесс агента занимает напрямую и эксклюзивно; если human-работа становится запускаемой без TTY, supervisor не создаёт для неё процесс и завершает команду runtime fail-fast с кодом `1`. Headless-режима для human Agent type нет.
-
 ## Control endpoint и события
 
 Supervisor, удерживающий Run lock, создаёт один volatile Unix domain socket
@@ -101,16 +77,6 @@ Parent supervisor является единственным поддержива
 защита и обнаружение изменений со стороны процесса того же локального
 пользователя не входят в текущий scope.
 
-## Process executor
-
-Перед запуском Process supervisor создаёт уникальный staging regular-file path для каждого объявленного output, передаёт mapping в `ORC_OUTPUT` и разрешает `{{output:…}}` в argv в соответствующий path; Process может создать или заменить этот файл, но не пишет durable artifact напрямую.
-
-Process наследует environment supervisor с заменой `ORC_STEP_ID`, `ORC_RUN_ID`, `ORC_ATTEMPT`, `ORC_INPUT` и `ORC_OUTPUT`, запускается отдельной process group с `stdin: null`, наследуемым stderr и stdout согласно `stdout`; `stdout: <input-id>` направляет точные bytes stdout в staging path этого output, а без `stdout` stdout наследуется.
-
-После exit code `0` supervisor проверяет, что каждый объявленный output существует и является regular file, полностью читает staging files и публикует artifacts и `completed` через ту же commit-точку, что Agent completion; отсутствующий или невалидный output является runtime failure без terminal event.
-
-Ненулевой exit code Process является runtime failure, не публикует staging outputs и не добавляет terminal event; код процесса не становится exit code orchestrator.
-
 ## Блокировка run
 
 Перед запуском первого шага через `start` или `resume` процесс открывает lock-файл
@@ -164,24 +130,6 @@ Artifacts и completion публикуются только при возвра�
 Artifact без соответствующего Agent attempt record, файловый остаток attempt без
 completion и временный файл атомарной записи не входят в модель и игнорируются;
 их автоматическая очистка не входит в текущий scope.
-
-## Fail-fast восстановление
-
-После получения Run lock, но до запуска агента, вычисления frontier
-или любой durable-записи orchestrator полностью проверяет materialized workflow,
-все Agent attempt records и artifacts успешно завершённых attempts. Все файлы
-должны соответствовать `format.spec.md` и не противоречить остальным фактам run;
-соответствие workflow graph и durable input activation проверяется по
-`workflow.spec.md`.
-
-Любая ошибка этой проверки завершает `start` или `resume` до запуска агентов и
-без изменения durable-модели run. Временные файлы атомарной записи, artifacts
-без соответствующего attempt и файловые остатки attempt без completion моделью
-не являются и на результат проверки не влияют.
-
-После успешной проверки результат каждого attempt вычисляется только его Agent
-type из materialized workflow и полного содержимого Agent attempt record;
-отдельный сохранённый status не используется.
 
 ## Read-only inspection
 

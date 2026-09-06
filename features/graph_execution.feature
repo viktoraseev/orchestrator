@@ -1,5 +1,5 @@
 Feature: Выполнение workflow graph
-  Durable facts определяют input mapping, frontier и глобальную нумерацию attempts.
+  Attempt — одна обработка Step activation выбранным Agent или Process executor; его первая durable-публикация фиксирует input mapping, а durable facts определяют frontier и глобальную нумерацию attempts.
 
   @workflow:initial-activation-dependencies-и-frontier @workflow:inputs-и-prompt @workflow:fail-fast-input-validation @format:agent-attempt-record
   Rule: Линейный target получает зафиксированную версию source artifacts

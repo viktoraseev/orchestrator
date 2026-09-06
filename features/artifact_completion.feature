@@ -1,5 +1,5 @@
 Feature: Публикация Agent completion и artifacts
-  Source-файлы остаются во владении Agent, а workflow видит только полный durable-набор последнего принятого completion после возврата Agent.
+  Artifact — версионируемый результат с durable-ключом `(attempt-n, step-id, input-id)`; source-файлы остаются во владении Agent, а workflow видит только полный неизменяемый набор последнего принятого completion после возврата Agent.
 
   @cli:session-activate-и-attempt-complete @format:artifact @format:agent-attempt-record
   Rule: Attempt complete принимает полный snapshot объявленных outputs

@@ -1,7 +1,7 @@
 # Форматы файлов orchestrator
 
 - Этот документ является единственным источником требований к layout состояния, именам файлов и их содержимому.
-- Семантика run и Agent attempts определена в `SPEC.md`, workflow graph — в `workflow.spec.md`, а команды и наблюдаемое поведение CLI — в `cli.md`.
+- Семантика run и attempts определена в `features/*.feature`, workflow graph — в `workflow.spec.md`, а команды и наблюдаемое поведение CLI — в `cli.md`.
 
 ## Корень состояния и layout
 
@@ -141,4 +141,4 @@ events:
 - Attempt с терминальным событием `completed` имеет ровно по одному artifact-файлу для каждого InputId из `outputs`: отсутствующий, повторяющийся или дополнительный artifact запрещён.
 - Файл сопоставляется с Agent attempt record по `n` и StepId.
 - Отдельный `<n>.<step-id>.output.yaml` не создаётся.
-- Правила публикации, неизменяемости и восстановления определены в `SPEC.md`.
+- Правила публикации и неизменяемости определены в `features/artifact_completion.feature`, а восстановления — в `features/recovery.feature`.

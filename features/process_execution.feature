@@ -1,4 +1,5 @@
 Feature: Исполнение произвольных процессов в workflow graph
+  Process executor — materialized executable, cwd, argv и optional stdout output обычного non-human Step; он не является Agent type, не имеет native session или control context и завершает attempt только через проверенный exit и supervisor-owned artifact commit.
 
   @format:workflow-template @workflow:inputs-и-prompt @cli:start @cli:сигналы-и-закрытие-терминала @cli:вывод-команд
   Rule: Process получает materialized argv, environment и non-interactive process boundary

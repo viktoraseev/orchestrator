@@ -1,6 +1,6 @@
 # CLI-контракт orchestrator
 
-Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель run, attempts, artifacts и workflow определена в `SPEC.md`, а layout состояния и форматы файлов — в `format.spec.md`.
+Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель run, attempts и artifacts определена в `features/*.feature`, workflow graph — в `workflow.spec.md`, а layout состояния и форматы файлов — в `format.spec.md`.
 
 ## Команды и аргументы
 
@@ -44,7 +44,7 @@ Config commands не получают run locks и не изменяют сущ�
 - Каждый `<path>` является переданным агентом абсолютным путём к source-файлу artifact; отдельный временный каталог orchestrator не создаёт и не передаёт, containment пути не проверяется, symbolic links разрешаются операционной системой, а конечный объект обязан быть regular file.
 - Parent сначала проверяет и полностью читает все файлы, затем целиком заменяет ими последний принятый кандидат текущей обработки attempt.
 - Каждый следующий валидный `attempt complete`, принятый пока обработка attempt активна, может передать другие bytes artifacts и снова целиком заменяет предыдущий кандидат.
-- До возврата процесса агента кандидат не завершает attempt и его artifacts не доступны workflow graph; при возврате последний принятый кандидат публикуется по правилам `SPEC.md`.
+- До возврата процесса агента кандидат не завершает attempt и его artifacts не доступны workflow graph; при возврате последний принятый кандидат публикуется по Rule «Completion становится durable только после возврата Agent» в `features/artifact_completion.feature`.
 
 - `orchestrator session activate <session-id>` имеет одинаковый контракт для создания, native resume и fork внутренней сессии: передаётся только ID активированной сессии.
 - Для fork это ID дочерней сессии; вид операции и parent session ID не сохраняются и не влияют на выбор сессии для следующего resume.
@@ -121,10 +121,10 @@ Config commands не получают run locks и не изменяют сущ�
 - Занятый Run lock завершается с `5` до запуска executors и durable-изменений.
 - Невалидная или противоречивая durable-модель завершается с `3` до запуска executors и durable-изменений.
 - Завершённый run является успешным no-op с кодом `0`.
-- Незавершённый валидный run продолжает attempts и ready activations по правилам `SPEC.md`.
+- Незавершённый валидный run продолжает attempts и ready activations по Rules в `features/lifecycle.feature` и `features/graph_execution.feature`.
 - Blocked run без запускаемой работы завершается с `1` и перечисляет частично удовлетворённые dependencies.
 
-- Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не делают run повреждённым и игнорируются по правилам `SPEC.md`.
+- Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не делают run повреждённым и игнорируются по Rule «Файловые остатки незавершённого attempt не входят в durable-модель» в `features/recovery.feature`.
 
 ## Read-only `run` inspection
 

@@ -1,7 +1,7 @@
 Feature: Durable lifecycle run
-  Lifecycle создаёт и продолжает run только через подтверждённую durable-модель.
+  Run — один сохраняемый запуск materialized workflow; attempts и artifacts образуют его durable-модель, а текущая позиция и состояние вычисляются из неё. Lifecycle создаёт и продолжает run только через подтверждённую durable-модель.
 
-  @cli:start @format:materialized-workflow @format:agent-attempt-record @spec:сущности @workflow:initial-activation-dependencies-и-frontier
+  @cli:start @format:materialized-workflow @format:agent-attempt-record @workflow:initial-activation-dependencies-и-frontier
   Rule: Start обещает только durable run
     После общего preflight start резервирует и блокирует run, durable-публикует проверенный materialized workflow до initial attempt и запускает Agent только после обеих публикаций; возврат Agent process без принятого completion оставляет attempt незавершённым и завершает команду runtime failure без автоматического повторного запуска или native resume в этой lifecycle-команде.
 
@@ -71,6 +71,7 @@ Feature: Durable lifecycle run
       When запускается orchestrator start delivery
       Then lifecycle завершается с кодом 1
       And durable activations равны process-session
+      And session activation не создала второй run
 
     @process
     Scenario: Process resume получает последнюю durable session ID

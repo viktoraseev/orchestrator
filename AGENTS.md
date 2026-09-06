@@ -8,7 +8,7 @@
 ## Источники требований
 
 - При написании, ревью и рефакторинге Rust-кода используйте `$rust-skills` как единственный источник общих Rust-рекомендаций; не копируйте их сюда.
-- `SPEC.md` содержит контракт run и Agent attempts, `workflow.spec.md` — workflow graph и validation, `format.spec.md` — layout и форматы файлов, а `cli.md` — публичный контракт команд, вывода, exit codes и сигналов. Изменение поведения требует одновременного обновления соответствующего документа и acceptance-сценариев.
+- `SPEC.md` содержит оставшийся контракт read-only inspection, `workflow.spec.md` — workflow graph и validation, `format.spec.md` — layout и форматы файлов, а `cli.md` — публичный контракт команд, вывода, exit codes и сигналов; перенесённые правила run и attempts находятся в `features/*.feature`. Изменение поведения требует одновременного обновления соответствующего документа и acceptance-сценариев.
 
 ## Границы проекта
 

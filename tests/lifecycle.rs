@@ -382,6 +382,31 @@ fn start_and_resume_through_process(world: &mut LifecycleWorld) {
     resume_through_process(world);
 }
 
+#[when("start материализует Agent, config изменяется и run продолжается")]
+fn resume_after_agent_config_change(world: &mut LifecycleWorld) {
+    start_through_process(world);
+    assert_eq!(
+        world.observed().exit_code,
+        1,
+        "{:?}",
+        world.observed().error
+    );
+    let root = world.root.as_ref().expect("scenario must define root");
+    let replacement_type = match world.agent_type.as_deref() {
+        Some("codex") => "claude",
+        Some("claude") => "codex",
+        other => panic!("unknown materialized Agent type: {other:?}"),
+    };
+    fs::write(
+        root.path().join("config.yaml"),
+        format!(
+            "default-agent: main\nagents:\n  main:\n    type: {replacement_type}\n    model: replacement\n    reasoning: low\n"
+        ),
+    )
+    .expect("replacement config must be written");
+    resume_through_process(world);
+}
+
 #[then(expr = "process Agent получил точные resume args для {word}")]
 #[allow(clippy::needless_pass_by_value)]
 fn exact_resume_agent_args(world: &mut LifecycleWorld, agent_type: String) {
@@ -909,6 +934,11 @@ fn unfinished_run_without_session(world: &mut LifecycleWorld) {
     world.calls.clear();
     world.observed = None;
     world.durable_snapshot = durable_snapshot(world);
+}
+
+#[given("run содержит оставшийся unlocked lock-файл")]
+fn run_contains_unlocked_lock_file(world: &mut LifecycleWorld) {
+    assert!(run_directory(world).join("active.lock").is_file());
 }
 
 #[given("подготовлен single-step human workflow")]
@@ -2562,6 +2592,17 @@ fn durable_process_activation(world: &mut LifecycleWorld) {
         "attempt={text}; observed={:?}",
         world.observed
     );
+}
+
+#[then("session activation не создала второй run")]
+fn session_activation_did_not_create_another_run(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let run_count = fs::read_dir(root.path().join("run"))
+        .expect("run root must be readable")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .count();
+    assert_eq!(run_count, 1);
 }
 
 #[then("каталог неизвестного run не создан")]

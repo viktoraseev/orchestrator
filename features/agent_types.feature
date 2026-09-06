@@ -1,7 +1,7 @@
 Feature: Встроенные Agent types
-  Каждый Agent process получает ORC_STEP_ID, ORC_CONTROL_ENDPOINT, ORC_RUN_ID, ORC_ATTEMPT и полный YAML input mapping в ORC_INPUT поверх type-specific prompt, model, reasoning и native resume arguments.
+  Agent type — встроенный adapter запуска, native resume и интерпретации protocol; каждый Agent process получает ORC_STEP_ID, ORC_CONTROL_ENDPOINT, ORC_RUN_ID, ORC_ATTEMPT и полный YAML input mapping в ORC_INPUT поверх type-specific prompt, model, reasoning и native resume arguments.
 
-  @process @spec:сущности
+  @process
   Rule: Codex type проверяет конфигурацию и имеет default executable
     Type `codex` принимает непустой model и reasoning `low`, `medium`, `high`, `xhigh` или `max`; без override запускается executable `codex`.
 
@@ -28,7 +28,7 @@ Feature: Встроенные Agent types
       Then lifecycle завершается с кодом 0
       And был запущен default executable codex
 
-  @process @spec:сущности
+  @process
   Rule: Claude type проверяет конфигурацию и имеет default executable
     Type `claude` принимает непустой model и reasoning `low`, `medium`, `high`, `xhigh` или `max`; без override запускается executable `claude`.
 
@@ -55,7 +55,23 @@ Feature: Встроенные Agent types
       Then lifecycle завершается с кодом 0
       And был запущен default executable claude
 
-  @process @spec:сущности @cli:корень-состояния-и-переменные-окружения @cli:вывод-команд
+  @process @format:materialized-workflow @cli:config-get-config-set-и-config-list @cli:resume
+  Rule: Run продолжает materialized Agent независимо от текущего config
+    Step или default-agent выбирает именованный Agent только при materialization; его type, model и reasoning входят в durable workflow, поэтому последующее изменение config влияет только на новые runs.
+
+    Scenario Outline: Изменение Agent config не меняет native resume существующего run
+      Given подготовлен single-step workflow для Agent type <type>
+      And process Agent сначала активирует session, а на resume записывает args и завершает attempt
+      When start материализует Agent, config изменяется и run продолжается
+      Then lifecycle завершается с кодом 0
+      And process Agent получил точные resume args для <type>
+
+      Examples:
+        | type   |
+        | codex  |
+        | claude |
+
+  @process @cli:корень-состояния-и-переменные-окружения @cli:вывод-команд
   Rule: Codex adapter строит и интерпретирует собственный protocol
     Новая non-human session получает args `exec --json --model model --config model_reasoning_effort="high" <prompt>`, а resume вставляет `resume` и native session ID.
 
@@ -75,7 +91,7 @@ Feature: Встроенные Agent types
       Then lifecycle завершается с кодом 0
       And process Agent получил точные resume args для codex
 
-  @process @spec:сущности @cli:вывод-команд
+  @process @cli:вывод-команд
   Rule: Claude adapter строит и интерпретирует собственный protocol
     Новая non-human session получает args `--print --output-format stream-json --verbose --model model --effort high <prompt>`, а resume добавляет `--resume <session-id>` перед prompt.
 
@@ -95,7 +111,7 @@ Feature: Встроенные Agent types
       Then lifecycle завершается с кодом 0
       And process Agent получил точные resume args для claude
 
-  @process @spec:сущности @cli:вывод-команд
+  @process @cli:вывод-команд
   Rule: Human adapters напрямую занимают TTY и активируют session через hook
     Codex start использует `--model model --config model_reasoning_effort="high" <prompt>`, Codex resume добавляет начальный `resume` и session ID; Claude использует `--model model --effort high [--resume <session-id>] <prompt>`.
 
@@ -112,7 +128,7 @@ Feature: Встроенные Agent types
         | codex  |
         | claude |
 
-  @process @spec:сущности @cli:вывод-команд
+  @process @cli:вывод-команд
   Rule: Обязательный session event интерпретируется fail-fast
     Codex требует `{"type":"thread.started","thread_id":"<session-id>"}`, а Claude — `{"type":"system","subtype":"init","session_id":"<session-id>"}`; повтор ID идемпотентен, другой ID противоречив, отсутствие события и невалидный JSON ошибочны, неизвестный валидный event игнорируется.
 
@@ -144,7 +160,7 @@ Feature: Встроенные Agent types
         | codex  |
         | claude |
 
-  @process @spec:сущности @cli:корень-состояния-и-переменные-окружения
+  @process @cli:корень-состояния-и-переменные-окружения
   Rule: Executable override не выполняет PATH lookup
     Непустой ORC_AGENT_COMMAND является единым absolute executable regular file для обоих Agent types; override не добавляет type-ID и не меняет type-specific args, environment или protocol.
 
@@ -162,7 +178,7 @@ Feature: Встроенные Agent types
         | directory                      |
         | non-executable regular file    |
 
-  @process @spec:сущности @cli:вывод-команд
+  @process @cli:вывод-команд
   Rule: Agent session view остаётся volatile
     Codex `item.completed` с `item.type = "agent_message"` и Claude `assistant` с text content blocks обновляют только volatile view; неизвестные валидные events игнорируются.
 

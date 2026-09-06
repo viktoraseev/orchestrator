@@ -1,6 +1,6 @@
 Feature: Read-only inspection durable runs
 
-  @spec:read-only-inspection @spec:сущности @format:корень-состояния-и-layout @cli:read-only-run-inspection
+  @spec:read-only-inspection @format:корень-состояния-и-layout @cli:read-only-run-inspection
   Rule: Run list вычисляет состояние без побочных эффектов
 
     Scenario: Пустой корень даёт пустой список

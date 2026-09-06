@@ -1,6 +1,6 @@
 # Workflow graph: спецификация
 
-Этот документ определяет семантику workflow graph, его validation и правила, по которым graph engine создаёт activations. Формат workflow-файла и описание его полей определены в `format.spec.md`, Run storage, Agent attempts и управление процессами — в `SPEC.md`, а публичное поведение CLI — в `cli.md`.
+Этот документ определяет семантику workflow graph, его validation и правила, по которым graph engine создаёт activations. Формат workflow-файла и описание его полей определены в `format.spec.md`, Run storage, Agent attempts и управление процессами — в `features/*.feature`, а публичное поведение CLI — в `cli.md`.
 
 ## Модель graph
 
@@ -23,7 +23,7 @@ Frontier — вычисляемое множество ready Steps. Один Ste
 
 У каждого Step может существовать не более одного незавершённого attempt независимо от `human`. Пока он не завершён терминальным `completed`, новые версии dependencies не создают параллельную activation этого Step; после его завершения следующий scheduling pass выбирает самые новые доступные source attempts, а промежуточные версии остаются историей.
 
-Принятый `attempt complete` работающего процесса не завершает source attempt и не изменяет frontier; attempt становится успешно завершённым только после фиксации возврата процесса с последним кандидатом по правилам `SPEC.md`.
+Принятый `attempt complete` работающего процесса не завершает source attempt и не изменяет frontier; attempt становится успешно завершённым только после фиксации возврата процесса с последним кандидатом по Rule «Completion становится durable только после возврата Agent» в `features/artifact_completion.feature`.
 
 Для новой activation выбирается доступный source attempt с максимальным номером для каждого dependency. Его номер должен быть меньше номера создаваемого attempt. Выбранные номера фиксируются при создании attempt, и более поздние source attempts их не меняют. Если между activations завершилось несколько attempts одного source Step, выбирается только последний; остальные остаются историей.
 
@@ -49,7 +49,7 @@ Step terminal, если ни один Step не содержит его ID в `d
 
 В одном run могут одновременно существовать attempts разных Steps; положительный `max-parallel-agents` из materialized workflow ограничивает общее число одновременно работающих Agent и Process executors, включая human и процессы native resume.
 
-На scheduling pass запускаемой работой являются ready activations и незавершённые attempts, которые текущая команда ещё не запускала; возврат процесса без completion не ставит тот же attempt в запускаемую работу повторно до следующего явного `resume` по правилам `SPEC.md`.
+На scheduling pass запускаемой работой являются ready activations и незавершённые attempts, которые текущая команда ещё не запускала; возврат процесса без completion не ставит тот же attempt в запускаемую работу повторно до следующего явного `resume` по Rule «Start обещает только durable run» в `features/lifecycle.feature`.
 
 - На каждом scheduling pass supervisor сначала учитывает уже работающие процессы; если свободных слотов нет, ready activations остаются во frontier, а незапущенные unfinished attempts ожидают слота внутри текущей команды.
 - Если human attempt не работает, есть запускаемая human-работа и свободен хотя бы один слот, но у lifecycle-команды нет TTY, supervisor не запускает никакую новую работу этого scheduling pass и завершает команду runtime fail-fast с кодом `1`; headless-запуск human attempt запрещён.

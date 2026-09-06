@@ -1,5 +1,5 @@
 Feature: Резервирование и блокировка run
-  Каждый start создаёт собственный durable run, а выполнять существующий run может только один supervisor.
+  Run lock — exclusive kernel lock одного run: каждый start создаёт собственный durable run, выполнять существующий run может только один supervisor, а наличие lock-файла само по себе не означает активность.
 
   @cli:start @cli:коды-завершения @format:корень-состояния-и-layout
   Rule: Start атомарно резервирует новый RunId
@@ -23,6 +23,13 @@ Feature: Резервирование и блокировка run
   @process @cli:resume @cli:коды-завершения @format:корень-состояния-и-layout @workflow:планирование
   Rule: Один supervisor удерживает Run lock весь lifecycle
     Start или resume неблокирующе получает exclusive kernel lock до запуска executor и удерживает его между всеми Steps; competing supervisor получает код 5 без durable-изменений, а после exit или crash lock освобождается ядром.
+
+    Scenario: Оставшийся unlocked lock-файл не означает активный run
+      Given подготовлен незавершённый run без session activations
+      And run содержит оставшийся unlocked lock-файл
+      When run продолжается через lifecycle API
+      Then lifecycle завершается с кодом 1
+      And resume запускает тот же attempt 0 без session activation
 
     Scenario: Второй supervisor не получает занятый Run lock
       Given подготовлен single-step workflow без outputs

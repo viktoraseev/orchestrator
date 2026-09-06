@@ -1,7 +1,7 @@
 # Форматы файлов orchestrator
 
-- Этот документ является источником требований к durable layout состояния и artifacts.
-- Контракт config, source и materialized workflow, prompt templates, run, attempts и workflow graph определён в `features/*.feature`, а команды и наблюдаемое поведение CLI — в `cli.md`.
+- Этот документ является источником требований к durable layout состояния и общим правилам YAML.
+- Контракт config, source и materialized workflow, prompt templates, run, attempts, artifacts и workflow graph определён в `features/*.feature`, а команды и наблюдаемое поведение CLI — в `cli.md`.
 
 ## Корень состояния и layout
 
@@ -24,16 +24,5 @@ run/<run-id>/<n>.<step-id>.<input-id>.artifact
 ## Общие правила YAML
 
 - `config.yaml` является YAML mapping.
-- Повторяющиеся mapping keys и неизвестные описанной ниже схеме поля запрещены.
+- Повторяющиеся mapping keys и поля config вне его schema запрещены.
 - Нарушение схемы или формата ID делает файл невалидным; поведение использующей его команды определено в `cli.md`.
-
-## Artifact
-
-- Artifact имеет имя `<n>.<step-id>.<input-id>.artifact` и является regular file с произвольными bytes.
-- Суффикс `.artifact` является частью имени и не задаёт формат содержимого; файл содержит произвольные bytes и не обязан быть текстовым.
-- InputId обязан быть объявлен в `outputs` Step из имени.
-
-- Attempt с терминальным событием `completed` имеет ровно по одному artifact-файлу для каждого InputId из `outputs`: отсутствующий, повторяющийся или дополнительный artifact запрещён.
-- Файл сопоставляется с Agent attempt record по `n` и StepId.
-- Отдельный `<n>.<step-id>.output.yaml` не создаётся.
-- Правила публикации и неизменяемости определены в `features/artifact_completion.feature`, а восстановления — в `features/recovery.feature`.

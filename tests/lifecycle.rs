@@ -1779,6 +1779,17 @@ fn complete_with_artifact(world: &mut LifecycleWorld) {
     );
 }
 
+#[when("Agent передаёт completion с произвольными binary bytes и возвращает управление")]
+fn complete_with_binary_artifact(world: &mut LifecycleWorld) {
+    run_start(
+        world,
+        [Behavior::Complete {
+            input_id: "result".to_owned(),
+            bytes: vec![0x00, 0xff, 0x0a, 0x80],
+        }],
+    );
+}
+
 #[when("Agent передаёт completion без artifacts и возвращает управление")]
 fn complete_without_artifacts(world: &mut LifecycleWorld) {
     run_start(world, [Behavior::CompleteEmpty]);
@@ -2926,6 +2937,53 @@ fn artifact_has_external_bytes(world: &mut LifecycleWorld) {
             .expect("artifact must be readable"),
         b"external"
     );
+}
+
+#[then(
+    "единственный durable artifact является regular file 0.first.result.artifact с исходными binary bytes"
+)]
+fn artifact_has_exact_name_and_binary_bytes(world: &mut LifecycleWorld) {
+    let directory = run_directory(world);
+    let path = directory.join("0.first.result.artifact");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("artifact metadata must be readable")
+            .file_type()
+            .is_file()
+    );
+    assert_eq!(
+        fs::read(&path).expect("artifact must be readable"),
+        [0x00, 0xff, 0x0a, 0x80]
+    );
+    let mut artifacts = fs::read_dir(directory)
+        .expect("run directory must be readable")
+        .map(|entry| {
+            entry
+                .expect("durable entry must be readable")
+                .file_name()
+                .into_string()
+                .expect("durable entry name must be UTF-8")
+        })
+        .filter(|name| name.ends_with(".artifact"))
+        .collect::<Vec<_>>();
+    artifacts.sort();
+    assert_eq!(artifacts, ["0.first.result.artifact"]);
+}
+
+#[then("отдельный output.yaml не создан")]
+fn output_marker_is_absent(world: &mut LifecycleWorld) {
+    let output_markers = fs::read_dir(run_directory(world))
+        .expect("run directory must be readable")
+        .map(|entry| {
+            entry
+                .expect("durable entry must be readable")
+                .file_name()
+                .into_string()
+                .expect("durable entry name must be UTF-8")
+        })
+        .filter(|name| name.ends_with(".output.yaml"))
+        .collect::<Vec<_>>();
+    assert!(output_markers.is_empty(), "markers={output_markers:?}");
 }
 
 #[then("symbolic link остался caller-owned после удаления source")]

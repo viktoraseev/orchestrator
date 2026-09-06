@@ -1,6 +1,6 @@
 # CLI-контракт orchestrator
 
-Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель run, attempts, artifacts и workflow graph, включая cycles, planning и validation, определена в `features/*.feature`, а durable layout и формат artifact — в `format.spec.md`.
+Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель run, attempts, artifacts и workflow graph, включая cycles, planning и validation, определена в `features/*.feature`, а durable layout — в `format.spec.md`.
 
 ## Команды и аргументы
 
@@ -97,7 +97,7 @@ Config commands не получают run locks и не изменяют сущ�
 
 - Запрос `attempt complete` с отсутствующим, повторяющимся или дополнительным InputId, не абсолютным или несуществующим path либо path, чей конечный объект не является regular file, не изменяет предыдущий кандидат; дочерний tool call завершается с `3`, и агент может исправить запрос.
 - Каждый валидный `attempt complete`, принятый пока обработка attempt активна, завершается с `0`; одинаковый или изменённый повтор заменяет предыдущий кандидат целиком.
-- Отдельной сущности `output` нет, а содержимое artifact обрабатывается по `format.spec.md`.
+- Отдельной сущности `output` нет, а содержимое artifact обрабатывается по Rule «Attempt complete принимает полный snapshot объявленных outputs» в `features/artifact_completion.feature`.
 
 ## `start`
 

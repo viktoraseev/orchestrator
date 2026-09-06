@@ -8,7 +8,7 @@
 ## Источники требований
 
 - При написании, ревью и рефакторинге Rust-кода используйте `$rust-skills` как единственный источник общих Rust-рекомендаций; не копируйте их сюда.
-- `features/*.feature` содержат контракт config, source и materialized workflow, prompt templates, run, Agent attempts, read-only inspection и workflow graph, включая cycles, terminal и blocked run, planning и validation, `format.spec.md` — durable layout и формат artifacts, а `cli.md` — публичный контракт команд, вывода, exit codes и сигналов. Изменение поведения требует одновременного обновления соответствующего документа и acceptance-сценариев.
+- `features/*.feature` содержат контракт config, source и materialized workflow, prompt templates, run, Agent attempts, artifacts, read-only inspection и workflow graph, включая cycles, terminal и blocked run, planning и validation, `format.spec.md` — durable layout и общие правила YAML, а `cli.md` — публичный контракт команд, вывода, exit codes и сигналов. Изменение поведения требует одновременного обновления соответствующего документа и acceptance-сценариев.
 
 ## Границы проекта
 

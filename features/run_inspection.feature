@@ -1,6 +1,6 @@
 Feature: Read-only inspection durable runs
 
-  @format:корень-состояния-и-layout @format:artifact @cli:read-only-run-inspection
+  @format:корень-состояния-и-layout @cli:read-only-run-inspection
   Rule: Run inspection читает согласованный snapshot
 
     Read-only inspection загружает materialized workflow, attempts и artifacts через ту же validation boundary, что resume.
@@ -93,8 +93,9 @@ Feature: Read-only inspection durable runs
       Then inspection завершается с кодом 4
       And inspection output пуст
 
-  @format:artifact @format:идентификаторы-и-номера @cli:read-only-run-inspection
+  @format:идентификаторы-и-номера @cli:read-only-run-inspection
   Rule: Run artifact выбирает точную durable версию
+    Выбранный artifact доступен только у completed attempt и отдаётся как точные bytes regular durable-файла с ключом `(attempt-n, step-id, input-id)` без текстового преобразования.
 
     @process
     Scenario: Бинарный artifact копируется без преобразования
@@ -117,7 +118,7 @@ Feature: Read-only inspection durable runs
         | 0       | missing | 4    |
         | 1       | result  | 4    |
 
-  @format:artifact @cli:read-only-run-inspection
+  @cli:read-only-run-inspection
   Rule: Run artifacts перечисляет только опубликованные версии
 
     Scenario: Typed API возвращает artifact descriptors

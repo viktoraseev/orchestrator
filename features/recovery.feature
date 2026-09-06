@@ -1,11 +1,12 @@
 Feature: Восстановление durable run
   Resume после получения Run lock проверяет все опубликованные attempts, выводит их состояние без отдельной state-записи или обязательного output-маркера и только затем продолжает unfinished attempts либо создаёт ready activations; crash leftovers остаются вне модели.
 
-  @format:artifact @cli:resume
+  @cli:resume
   Rule: Противоречивая durable-модель отклоняется до побочных эффектов
     После получения Run lock и до запуска executor, вычисления frontier или durable publication resume полностью проверяет materialized workflow, все attempt records и artifacts завершённых attempts на соответствие format и workflow graph; любая ошибка завершает команду без запуска Agent и изменения durable-модели.
     Attempt record является regular YAML file с именем `<n>.<step-id>.attempt.yaml` и закрытым root mapping из обязательных sequences `input` и `events`; имя связывает record с глобальным номером и существующим Step, duplicate keys, неизвестные поля и нарушения типов запрещены.
     Каждый event является закрытым mapping: session activation содержит только `type: session-activated` и строковый `session-id`, completion — только `type: completed`; соседние session activations не повторяют ID, completed встречается не более одного раза и только последним.
+    Каждый completed attempt имеет ровно один regular artifact `<n>.<step-id>.<input-id>.artifact` для каждого объявленного output и не имеет дополнительных artifacts под своим durable-префиксом; отсутствие либо дополнительный InputId делает run противоречивым.
     После успешной проверки состояния running, paused и completed вычисляются из validated workflow, record и artifacts и отдельными полями не сохраняются.
 
     Scenario Outline: Ошибка любого связанного durable-факта возвращает код 3
@@ -58,7 +59,7 @@ Feature: Восстановление durable run
       Then lifecycle завершается с кодом 3
       And Agent не запускался и повреждённый durable run не изменился
 
-  @format:artifact @cli:resume
+  @cli:resume
   Rule: Номера attempts глобальны и не переиспользуются
     Attempt существует только после атомарной публикации record; первый attempt получает номер 0, а каждый следующий — номер больше любого опубликованного или зарезервированного crash-остатком номера во всём run, поэтому пропуски не заполняются.
 
@@ -80,7 +81,7 @@ Feature: Восстановление durable run
       Then lifecycle завершается с кодом 1
       And target получает следующий свободный глобальный номер 100
 
-  @format:корень-состояния-и-layout @format:artifact @cli:resume
+  @format:корень-состояния-и-layout @cli:resume
   Rule: Файловые остатки незавершённого attempt не входят в durable-модель
     Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не участвуют в validation, recovery или workflow graph и не удаляются автоматически.
 

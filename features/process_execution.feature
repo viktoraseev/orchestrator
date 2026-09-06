@@ -110,7 +110,7 @@ Feature: Исполнение произвольных процессов в wor
       And Process attempt не содержит session activation
       And run завершён
 
-  @format:artifacts @cli:коды-завершения
+  @cli:коды-завершения
   Rule: Process completion проходит через durable artifact commit
     После exit code 0 supervisor проверяет, что каждый объявленный output существует и является regular file, полностью читает staging files и публикует artifacts и completed через ту же commit-точку, что Agent completion; отсутствующий или невалидный output является runtime failure без terminal event.
 

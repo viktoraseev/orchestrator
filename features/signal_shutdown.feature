@@ -1,7 +1,7 @@
 Feature: Signal shutdown lifecycle
   Первый termination signal задаёт итог команды и управляет всеми supervised process groups.
 
-  @process @cli:сигналы-и-закрытие-терминала @cli:коды-завершения @spec:блокировка-run
+  @process @cli:сигналы-и-закрытие-терминала @cli:коды-завершения
   Rule: Первый termination signal штатно завершает supervisor
 
     Scenario Outline: Supervisor пересылает signal Agent process group

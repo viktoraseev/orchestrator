@@ -23,14 +23,6 @@ Feature: Durable lifecycle run
       And stdout содержит workflow, RunId и финальную строку exited в стабильном порядке
       And initial attempt остаётся незавершённым
 
-    @process
-    Scenario: Второй supervisor не получает занятый Run lock
-      Given подготовлен single-step workflow без outputs
-      And process Agent ожидает явного разрешения
-      When во время первого start запускается competing resume
-      Then lifecycle завершается с кодом 5
-      And competing resume не изменяет initial attempt
-
     Scenario: Несовместимый Agent type отклоняется до создания run
       Given подготовлен single-step workflow без outputs
       When workflow запускается через lifecycle API с Agent type без native resume

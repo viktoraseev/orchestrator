@@ -17,7 +17,7 @@ use crate::agent::{AgentRegistry, BuiltinAgentRegistry};
 use crate::config::CommandError;
 use crate::domain::{AttemptRecord, DurableAttempt, MaterializedStep, MaterializedWorkflow, RunId};
 
-/// Удерживает exclusive kernel lock run до завершения supervisor; см. Rule «Start обещает только durable run» в `features/lifecycle.feature`.
+/// Удерживает exclusive kernel lock run до завершения supervisor; см. Rule «Один supervisor удерживает Run lock весь lifecycle» в `features/run_lock.feature`.
 pub(super) struct RunGuard {
     pub(super) directory: PathBuf,
     _lock: File,

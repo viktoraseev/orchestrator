@@ -38,6 +38,9 @@ struct LifecycleWorld {
     stale_control_endpoint: Option<PathBuf>,
     new_control_endpoint: Option<PathBuf>,
     stale_endpoint_existed: bool,
+    competing_durable_unchanged: bool,
+    concurrent_observed: Vec<Observed>,
+    concurrent_run_ids: Vec<String>,
 }
 
 struct ProcessTreeGuard {
@@ -869,6 +872,21 @@ fn workflow_without_outputs(world: &mut LifecycleWorld) {
     prepare_workflow(world, &[]);
 }
 
+#[given("путь run занят regular file")]
+fn run_path_is_regular_file(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    fs::write(root.path().join("run"), b"occupied").expect("run path fixture must be written");
+}
+
+#[given("подготовлен последовательный workflow без outputs")]
+fn sequential_workflow_without_outputs(world: &mut LifecycleWorld) {
+    prepare_graph(
+        world,
+        "steps:\n  - id: root\n    agent: main\n    prompt: null\n    human: false\n    depends-on: []\n    outputs: []\n  - id: target\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [root]\n    outputs: []\n",
+        None,
+    );
+}
+
 #[given("подготовлен single-step workflow с output result")]
 fn workflow_with_output(world: &mut LifecycleWorld) {
     prepare_workflow(world, &["result"]);
@@ -1147,6 +1165,21 @@ fn process_agent_without_completion(world: &mut LifecycleWorld) {
 
 #[given("process Agent ожидает явного разрешения")]
 fn process_agent_waits_for_release(world: &mut LifecycleWorld) {
+    prepare_gated_process_agent(
+        world,
+        "#!/bin/sh\nprintf '%s' \"$$\" > \"$ORC_HOME/lock-agent.pid\"\n: > \"$ORC_TEST_READY\"\nIFS= read -r ignored < \"$ORC_TEST_GATE\"\n",
+    );
+}
+
+#[given("process Agent завершает initial Step и ожидает на target")]
+fn process_agent_waits_on_target(world: &mut LifecycleWorld) {
+    prepare_gated_process_agent(
+        world,
+        "#!/bin/sh\ncase \"$ORC_STEP_ID\" in\n  root) \"$ORC_TEST_ORCHESTRATOR\" attempt complete ;;\n  target) printf '%s' \"$$\" > \"$ORC_HOME/lock-agent.pid\"; : > \"$ORC_TEST_READY\"; IFS= read -r ignored < \"$ORC_TEST_GATE\" ;;\nesac\n",
+    );
+}
+
+fn prepare_gated_process_agent(world: &mut LifecycleWorld, script: &str) {
     let root = world.root.as_ref().expect("scenario must define root");
     let gate = root.path().join("agent-gate");
     let ready = root.path().join("agent-ready");
@@ -1157,9 +1190,14 @@ fn process_agent_waits_for_release(world: &mut LifecycleWorld) {
     assert!(status.success());
     world.process_gate = Some(gate);
     world.process_ready = Some(ready);
+    prepare_process_agent(world, script);
+}
+
+#[given("process Agent завершает attempt без outputs")]
+fn process_agent_completes_without_outputs(world: &mut LifecycleWorld) {
     prepare_process_agent(
         world,
-        "#!/bin/sh\n: > \"$ORC_TEST_READY\"\nIFS= read -r ignored < \"$ORC_TEST_GATE\"\n",
+        "#!/bin/sh\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n",
     );
 }
 
@@ -2026,12 +2064,14 @@ fn competing_resume(world: &mut LifecycleWorld) {
         .args(["start", "delivery"])
         .env("ORC_HOME", root.path())
         .env("ORC_AGENT_COMMAND", agent)
+        .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
         .env("ORC_TEST_GATE", gate)
         .env("ORC_TEST_READY", ready)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("first orchestrator must start");
+    let mut first = ProcessTreeGuard::new(first, root.path().join("lock-agent.pid"));
     wait_for_path(ready);
     let run_id = fs::read_dir(root.path().join("run"))
         .expect("run root must be readable")
@@ -2041,18 +2081,22 @@ fn competing_resume(world: &mut LifecycleWorld) {
         .file_name()
         .to_string_lossy()
         .into_owned();
+    world.run_id = Some(run_id.clone());
+    let target_attempt = run_directory(world).join("1.target.attempt.yaml");
+    if target_attempt.exists() {
+        wait_for_file_content(&target_attempt, "session-activated");
+    }
+    world.durable_snapshot = durable_snapshot(world);
     let competing = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
         .args(["resume", &run_id])
         .env("ORC_HOME", root.path())
         .env("ORC_AGENT_COMMAND", agent)
         .output()
         .expect("competing orchestrator must run");
+    world.competing_durable_unchanged = durable_snapshot(world) == world.durable_snapshot;
     fs::write(gate, b"release\n").expect("Agent must be released");
-    let first_output = first
-        .wait_with_output()
-        .expect("first orchestrator must exit");
+    let first_output = first.wait_with_output();
     assert_eq!(first_output.status.code(), Some(1));
-    world.run_id = Some(run_id);
     world.observed = Some(Observed {
         exit_code: u8::try_from(competing.status.code().expect("process must exit normally"))
             .expect("fixture exit code must fit u8"),
@@ -2063,6 +2107,48 @@ fn competing_resume(world: &mut LifecycleWorld) {
             .collect(),
         error: Some(String::from_utf8_lossy(&competing.stderr).into_owned()),
     });
+}
+
+#[when("одновременно запускаются два orchestrator start delivery")]
+fn two_starts_run_concurrently(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let agent = world
+        .process_agent
+        .as_ref()
+        .expect("scenario must define process Agent");
+    let spawn = || {
+        Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+            .args(["start", "delivery"])
+            .env("ORC_HOME", root.path())
+            .env("ORC_AGENT_COMMAND", agent)
+            .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("orchestrator start must run")
+    };
+    let mut children = [
+        ProcessTreeGuard::new(spawn(), root.path().join("missing-agent-1.pid")),
+        ProcessTreeGuard::new(spawn(), root.path().join("missing-agent-2.pid")),
+    ];
+    let observed: Vec<Observed> = children
+        .iter_mut()
+        .map(|child| observe_process_output(child.wait_with_output()))
+        .collect();
+    let run_ids = observed
+        .iter()
+        .map(|result| {
+            result
+                .lines
+                .iter()
+                .find_map(|line| line.strip_prefix("Run "))
+                .filter(|line| !line.ends_with(" exited"))
+                .expect("start must report RunId")
+                .to_owned()
+        })
+        .collect();
+    world.concurrent_observed = observed;
+    world.concurrent_run_ids = run_ids;
 }
 
 #[when("run продолжается через lifecycle API")]
@@ -2205,9 +2291,56 @@ fn lifecycle_run_was_not_created(world: &mut LifecycleWorld) {
     assert!(!root.path().join("run").exists());
 }
 
+#[then("Agent не запускался и regular file run не изменился")]
+fn reservation_failure_has_no_side_effects(world: &mut LifecycleWorld) {
+    assert!(world.calls.is_empty());
+    let root = world.root.as_ref().expect("scenario must define root");
+    assert_eq!(
+        fs::read(root.path().join("run")).expect("run path fixture must be readable"),
+        b"occupied"
+    );
+}
+
 #[then("competing resume не изменяет initial attempt")]
 fn competing_resume_does_not_mutate(world: &mut LifecycleWorld) {
     attempt_unfinished(world);
+}
+
+#[then("competing resume не изменяет durable run")]
+fn competing_resume_does_not_change_durable_run(world: &mut LifecycleWorld) {
+    assert!(world.competing_durable_unchanged);
+}
+
+#[then("оба lifecycle завершаются с кодом 0")]
+fn both_lifecycles_complete_successfully(world: &mut LifecycleWorld) {
+    assert_eq!(world.concurrent_observed.len(), 2);
+    assert!(
+        world
+            .concurrent_observed
+            .iter()
+            .all(|result| result.exit_code == 0)
+    );
+}
+
+#[then("start публикуют два разных RunId и два независимых durable run")]
+fn concurrent_starts_publish_distinct_runs(world: &mut LifecycleWorld) {
+    assert_eq!(world.concurrent_run_ids.len(), 2);
+    assert_ne!(world.concurrent_run_ids[0], world.concurrent_run_ids[1]);
+    let root = world.root.as_ref().expect("scenario must define root");
+    for run_id in &world.concurrent_run_ids {
+        let directory = root.path().join("run").join(run_id);
+        assert!(directory.join("spec.yaml").is_file());
+        let attempt = fs::read_to_string(directory.join("0.first.attempt.yaml"))
+            .expect("completed attempt must be readable");
+        assert!(attempt.contains("type: completed"));
+    }
+}
+
+#[then("resume запускает незавершённый target attempt 1")]
+fn resume_runs_unfinished_target_attempt(world: &mut LifecycleWorld) {
+    assert_eq!(world.calls.len(), 1);
+    assert_eq!(world.calls[0].step_id, "target");
+    assert_eq!(world.calls[0].attempt, 1);
 }
 
 #[then("stdout содержит workflow, RunId и финальную строку exited в стабильном порядке")]
@@ -3052,6 +3185,21 @@ fn wait_for_path(path: &std::path::Path) {
     }
 }
 
+fn wait_for_file_content(path: &std::path::Path, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if fs::read_to_string(path).is_ok_and(|content| content.contains(expected)) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timeout waiting for {expected} in {}",
+            path.display()
+        );
+        std::thread::yield_now();
+    }
+}
+
 fn run_start(world: &mut LifecycleWorld, behaviors: impl IntoIterator<Item = Behavior>) {
     run_start_with_terminal(world, behaviors, TerminalMode::Unavailable);
 }
@@ -3118,6 +3266,19 @@ fn unix_time_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .expect("system time must be after Unix epoch")
         .as_millis()
+}
+
+fn observe_process_output(output: std::process::Output) -> Observed {
+    Observed {
+        exit_code: u8::try_from(output.status.code().expect("process must exit normally"))
+            .expect("fixture exit code must fit u8"),
+        lines: String::from_utf8(output.stdout)
+            .expect("stdout must be UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        error: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    }
 }
 
 fn observe(result: Result<(), orchestrator::CommandError>, reporter: VecReporter) -> Observed {
@@ -3207,6 +3368,7 @@ impl LifecycleWorld {
 #[tokio::main]
 async fn main() {
     LifecycleWorld::run("features/lifecycle.feature").await;
+    LifecycleWorld::run("features/run_lock.feature").await;
     LifecycleWorld::run("features/control_endpoint.feature").await;
     LifecycleWorld::run("features/graph_execution.feature").await;
     LifecycleWorld::run("features/recovery.feature").await;

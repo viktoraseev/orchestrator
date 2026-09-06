@@ -78,7 +78,7 @@ Feature: Выполнение workflow graph
       Then lifecycle завершается с кодом 1
       And stderr сообщает blocked и отсутствующие source Steps c, b
 
-  @workflow:планирование @spec:блокировка-run @cli:коды-завершения
+  @workflow:планирование @cli:коды-завершения
   Rule: Non-human attempts выполняются параллельно под общим лимитом
 
     Scenario: Независимые ветви одновременно занимают два разрешённых slot

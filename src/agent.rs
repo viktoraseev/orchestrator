@@ -29,7 +29,7 @@ pub trait AttemptControl: Send {
 
     /// Заменяет volatile-кандидат completion полным набором source paths.
     ///
-    /// См. Rule «Completion становится durable только после возврата Agent» в `features/lifecycle.feature`.
+    /// См. Rule «Completion становится durable только после возврата Agent» в `features/artifact_completion.feature`.
     ///
     /// # Errors
     ///

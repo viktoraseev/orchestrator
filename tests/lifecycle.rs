@@ -619,6 +619,7 @@ enum Behavior {
     ReturnWithoutCompletion,
     Activate(Vec<String>),
     Complete { input_id: String, bytes: Vec<u8> },
+    CompleteExternalSymlink,
     CompleteTwice,
     CompleteActivateComplete,
     CompleteThenInvalid,
@@ -702,6 +703,15 @@ impl AgentRegistry for FakeAgentRegistry {
                     .join(format!("source-artifact-{}", request.attempt));
                 fs::write(&source, bytes).map_err(|error| error.to_string())?;
                 control.complete(&[(input_id, source)])?;
+            }
+            Behavior::CompleteExternalSymlink => {
+                use std::os::unix::fs::symlink;
+
+                let source = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+                fs::write(source.path(), b"external").map_err(|error| error.to_string())?;
+                let link = self.root.join("external-source-link");
+                symlink(source.path(), &link).map_err(|error| error.to_string())?;
+                control.complete(&[("result".to_owned(), link)])?;
             }
             Behavior::CompleteTwice => {
                 let source = self.root.join("source-artifact");
@@ -1201,6 +1211,23 @@ fn process_agent_completes_without_outputs(world: &mut LifecycleWorld) {
     );
 }
 
+#[given("process Agent передаёт completion draft и блокируется до возврата")]
+fn process_agent_blocks_after_draft_completion(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let gate = root.path().join("completion-crash-gate");
+    let status = Command::new("mkfifo")
+        .arg(&gate)
+        .status()
+        .expect("mkfifo must run");
+    assert!(status.success());
+    world.process_gate = Some(gate);
+    world.process_ready = Some(root.path().join("completion-crash-ready"));
+    prepare_process_agent(
+        world,
+        "#!/bin/sh\nprintf '%s' \"$$\" > \"$ORC_HOME/crash-agent.pid\"\nprintf '%s' \"$ORC_RUN_ID\" > \"$ORC_HOME/saved.run-id\"\nprintf draft > \"$ORC_HOME/crash-source\"\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete --artifact result \"$ORC_HOME/crash-source\"\n: > \"$ORC_TEST_READY\"\nIFS= read -r ignored < \"$ORC_TEST_GATE\"\n",
+    );
+}
+
 #[given("process Agent ожидает termination signal")]
 fn process_agent_waits_for_signal(world: &mut LifecycleWorld) {
     prepare_signal_gate(world);
@@ -1491,6 +1518,16 @@ fn complete_with_artifact(world: &mut LifecycleWorld) {
             bytes: b"final".to_vec(),
         }],
     );
+}
+
+#[when("Agent передаёт completion без artifacts и возвращает управление")]
+fn complete_without_artifacts(world: &mut LifecycleWorld) {
+    run_start(world, [Behavior::CompleteEmpty]);
+}
+
+#[when("Agent передаёт external source через absolute symbolic link и возвращает управление")]
+fn complete_from_external_symlink(world: &mut LifecycleWorld) {
+    run_start(world, [Behavior::CompleteExternalSymlink]);
 }
 
 #[when("Agent передаёт completion сначала с bytes draft, затем final и возвращает управление")]
@@ -1927,6 +1964,62 @@ fn resume_after_supervisor_sigkill(world: &mut LifecycleWorld) {
     world.new_control_endpoint = Some(PathBuf::from(
         fs::read_to_string(root.join("new.endpoint")).expect("new endpoint path must be readable"),
     ));
+}
+
+#[when("supervisor завершается SIGKILL до возврата Agent, а resume передаёт final")]
+fn replace_volatile_completion_after_sigkill(world: &mut LifecycleWorld) {
+    let root = world
+        .root
+        .as_ref()
+        .expect("scenario must define root")
+        .path()
+        .to_owned();
+    let agent = world
+        .process_agent
+        .as_ref()
+        .expect("scenario must define process Agent");
+    let gate = world
+        .process_gate
+        .as_ref()
+        .expect("scenario must define process gate");
+    let ready = world
+        .process_ready
+        .as_ref()
+        .expect("scenario must define ready marker");
+    let child = Command::new(env!("CARGO_BIN_EXE_orchestrator"))
+        .args(["start", "delivery"])
+        .env("ORC_HOME", &root)
+        .env("ORC_AGENT_COMMAND", agent)
+        .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
+        .env("ORC_TEST_GATE", gate)
+        .env("ORC_TEST_READY", ready)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("orchestrator must start");
+    let mut processes = ProcessTreeGuard::new(child, root.join("crash-agent.pid"));
+    wait_for_path(ready);
+    let run_id =
+        fs::read_to_string(root.join("saved.run-id")).expect("saved RunId must be readable");
+    let agent_pid =
+        fs::read_to_string(root.join("crash-agent.pid")).expect("Agent pid must be readable");
+    send_signal(processes.id(), "KILL");
+    send_signal(
+        agent_pid.trim().parse().expect("Agent pid must be numeric"),
+        "KILL",
+    );
+    let first_output = processes.wait_with_output();
+    assert!(first_output.status.code().is_none());
+    world.run_id = Some(run_id);
+    let (observed, calls) = resume_with_fake(
+        world,
+        [Behavior::Complete {
+            input_id: "result".to_owned(),
+            bytes: b"final".to_vec(),
+        }],
+    );
+    world.observed = Some(observed);
+    world.calls = calls;
 }
 
 fn resume_through_process(world: &mut LifecycleWorld) {
@@ -2482,6 +2575,37 @@ fn artifact_has_final_bytes(world: &mut LifecycleWorld) {
         fs::read(run_directory(world).join("0.first.result.artifact"))
             .expect("artifact must be readable"),
         b"final"
+    );
+}
+
+#[then("durable artifact result содержит bytes external")]
+fn artifact_has_external_bytes(world: &mut LifecycleWorld) {
+    assert_eq!(
+        fs::read(run_directory(world).join("0.first.result.artifact"))
+            .expect("artifact must be readable"),
+        b"external"
+    );
+}
+
+#[then("symbolic link остался caller-owned после удаления source")]
+fn external_source_is_not_durable(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    let link = root.path().join("external-source-link");
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("source symbolic link must remain")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!link.exists());
+}
+
+#[then("source draft остался caller-owned вне durable run")]
+fn crash_source_remains_outside_durable_run(world: &mut LifecycleWorld) {
+    let root = world.root.as_ref().expect("scenario must define root");
+    assert_eq!(
+        fs::read(root.path().join("crash-source")).expect("crash source must remain readable"),
+        b"draft"
     );
 }
 
@@ -3368,6 +3492,7 @@ impl LifecycleWorld {
 #[tokio::main]
 async fn main() {
     LifecycleWorld::run("features/lifecycle.feature").await;
+    LifecycleWorld::run("features/artifact_completion.feature").await;
     LifecycleWorld::run("features/run_lock.feature").await;
     LifecycleWorld::run("features/control_endpoint.feature").await;
     LifecycleWorld::run("features/graph_execution.feature").await;

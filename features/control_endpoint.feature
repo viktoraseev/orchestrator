@@ -35,17 +35,6 @@ Feature: Control endpoint активных Agent attempts
       And закрытый control endpoint удалён
       And Agent не запускался и durable run не изменился
 
-  @cli:session-activate-и-attempt-complete @format:agent-attempt-record @format:artifact
-  Rule: Completion-кандидат не закрывает активную обработку attempt
-    Пока Agent process не вернул управление, каждый валидный attempt complete целиком заменяет предыдущий кандидат, а session activations продолжают приниматься; parent финализирует последний кандидат только после обработки более ранних control calls.
-
-    Scenario: После completion-кандидата принимаются activation и новый кандидат
-      Given подготовлен single-step workflow с output result
-      When Agent передаёт completion draft, активирует session late-session, передаёт completion final и возвращается
-      Then lifecycle завершается с кодом 0
-      And durable artifact result содержит bytes final
-      And durable attempt содержит late-session перед completed
-
   @process @workflow:планирование @cli:сигналы-и-закрытие-терминала @format:agent-attempt-record
   Rule: Один supervisor использует один защищённый volatile endpoint
     Все одновременные Agent attempts run используют один Unix socket с правами 600; после штатного выхода endpoint удаляется, а после crash следующий supervisor удаляет stale path и создаёт новый непереиспользуемый endpoint.

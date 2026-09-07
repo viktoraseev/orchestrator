@@ -70,7 +70,7 @@ fn empty_inspection_root(world: &mut InspectionWorld) {
     world.root = Some(TempDir::new().expect("inspection root must be created"));
 }
 
-#[given("подготовлены active, blocked и completed durable runs")]
+#[given("подготовлены active, закрытый условный и completed durable runs")]
 fn three_run_states(world: &mut InspectionWorld) {
     empty_inspection_root(world);
     write_active_run(world.root(), 10);
@@ -78,7 +78,7 @@ fn three_run_states(world: &mut InspectionWorld) {
     write_completed_run(world.root(), 30);
 }
 
-#[given("подготовлены active, blocked и completed durable runs и нечисловые entries")]
+#[given("подготовлены active, закрытый условный и completed durable runs и нечисловые entries")]
 fn three_run_states_and_non_numeric_entries(world: &mut InspectionWorld) {
     three_run_states(world);
     fs::create_dir_all(world.root().join("run/draft"))
@@ -123,22 +123,27 @@ fn active_locked_run(world: &mut InspectionWorld) {
     world.lock = Some(lock);
 }
 
-#[given("подготовлен completed run с двумя версиями бинарного artifact")]
+#[given("подготовлен run с двумя завершёнными версиями бинарного artifact")]
 fn versioned_binary_artifacts(world: &mut InspectionWorld) {
     empty_inspection_root(world);
     let directory = run_directory(world.root(), 30);
     write_run_files(
         &directory,
-        &single_step_spec("binary", "[result]"),
+        &(single_step_spec("binary", "[result]").replace("depends-on: []", "depends-on: [bridge]")
+            + "- id: bridge\n  agent:\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: [first]\n  outputs: []\n"),
         &[
             (
                 "0.first.attempt.yaml",
                 "input: []\nevents:\n- type: completed\n",
             ),
-            ("1.first.attempt.yaml", "input: []\nevents: []\n"),
+            (
+                "1.bridge.attempt.yaml",
+                "input: [0]\nevents: [{type: completed}]\n",
+            ),
+            ("3.bridge.attempt.yaml", "input: [2]\nevents: []\n"),
             (
                 "2.first.attempt.yaml",
-                "input: []\nevents:\n- type: completed\n",
+                "input: [1]\nevents:\n- type: completed\n",
             ),
         ],
     );
@@ -146,7 +151,7 @@ fn versioned_binary_artifacts(world: &mut InspectionWorld) {
         .expect("first artifact must be written");
     fs::write(directory.join("2.first.result.artifact"), b"second")
         .expect("second artifact must be written");
-    fs::write(directory.join("1.first.result.artifact"), b"unfinished")
+    fs::write(directory.join("3.bridge.result.artifact"), b"unfinished")
         .expect("unfinished artifact must be written");
     fs::write(directory.join(".artifact.tmp"), b"temporary")
         .expect("temporary artifact must be written");
@@ -380,12 +385,12 @@ fn inspection_output_is_empty(world: &mut InspectionWorld) {
 }
 
 #[then(
-    "text list содержит по одной отсортированной summary-строке для active, blocked и completed"
+    "text list содержит по одной отсортированной summary-строке для active, закрытого условного и completed"
 )]
 fn list_is_sorted_with_states(world: &mut InspectionWorld) {
     assert_eq!(
         world.stdout_text(),
-        "run 10: workflow=active state=active\nrun 20: workflow=blocked state=blocked\nrun 30: workflow=completed state=completed\n"
+        "run 10: workflow=active state=active\nrun 20: workflow=skipped state=completed\nrun 30: workflow=completed state=completed\n"
     );
 }
 
@@ -694,15 +699,17 @@ fn write_ready_run(root: &Path, run_id: u64) {
 
 fn write_blocked_run(root: &Path, run_id: u64) {
     let directory = run_directory(root, run_id);
-    let spec = "workflow-id: blocked\nmax-parallel-agents: 5\nsteps:\n- id: a\n  agent:\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: [b, c]\n  outputs: []\n- id: b\n  agent:\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: [a, c]\n  outputs: []\n- id: c\n  agent:\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: [a, b]\n  outputs: []\n";
+    let spec = single_step_spec("skipped", "[{one-of: [fix, done]}]")
+        + "- id: fix\n  agent:\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: [{step: first, output: fix}]\n  outputs: []\n";
     write_run_files(
         &directory,
-        spec,
+        &spec,
         &[(
-            "0.a.attempt.yaml",
+            "0.first.attempt.yaml",
             "input: []\nevents:\n- type: completed\n",
         )],
     );
+    fs::write(directory.join("0.first.done.artifact"), "done").unwrap();
 }
 
 fn single_step_spec(workflow_id: &str, outputs: &str) -> String {

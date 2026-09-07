@@ -1043,7 +1043,7 @@ fn cyclic_workflow(world: &mut LifecycleWorld) {
 fn mixed_cycle_workflow(world: &mut LifecycleWorld) {
     prepare_graph(
         world,
-        "steps:\n  - id: a\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [c, side]\n    outputs: [forward]\n  - id: sink\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [c]\n    outputs: []\n  - id: b\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [a]\n    outputs: [bridge]\n  - id: side\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [a]\n    outputs: [context]\n  - id: c\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [b]\n    outputs: [feedback]\n",
+        "steps:\n  - id: a\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [c]\n    outputs: [forward]\n  - id: sink\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [c]\n    outputs: []\n  - id: b\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [a]\n    outputs: [bridge]\n  - id: side\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [a]\n    outputs: [context]\n  - id: c\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [b, side]\n    outputs: [feedback]\n",
         None,
     );
     let root = world.root.as_ref().expect("scenario must define root");
@@ -1054,7 +1054,7 @@ fn mixed_cycle_workflow(world: &mut LifecycleWorld) {
     .expect("mixed cycle config must be written");
 }
 
-#[given("подготовлен durable run с частично удовлетворёнными dependency groups")]
+#[given("подготовлен durable run с недопустимыми взаимными циклами")]
 fn partially_satisfied_durable_run(world: &mut LifecycleWorld) {
     prepare_durable_run(
         world,
@@ -2088,7 +2088,7 @@ fn resume_unfinished_repeated_a(world: &mut LifecycleWorld) {
     world.observed = Some(observe(result, reporter));
 }
 
-#[when("blocked run дважды продолжается через lifecycle API")]
+#[when("невалидный циклический run дважды продолжается через lifecycle API")]
 fn resume_blocked_run_twice(world: &mut LifecycleWorld) {
     world.durable_snapshot = durable_snapshot(world);
     let (first, first_calls) = resume_with_fake(world, []);
@@ -2105,7 +2105,7 @@ fn resume_ready_target(world: &mut LifecycleWorld) {
     world.calls = calls;
 }
 
-#[when("blocked run продолжается через CLI")]
+#[when("невалидный циклический run продолжается через CLI")]
 fn resume_blocked_run_through_cli(world: &mut LifecycleWorld) {
     let root = world.root.as_ref().expect("scenario must define root");
     let agent = world
@@ -3249,7 +3249,7 @@ fn mixed_cycle_attempt_order(world: &mut LifecycleWorld) {
     );
 }
 
-#[then("повторный a получает feedback c и context side, а sink получает feedback c")]
+#[then("c объединяет b и side, а повторный a и sink получают feedback c")]
 fn mixed_cycle_keeps_independent_inputs_and_outputs(world: &mut LifecycleWorld) {
     let repeated_a = world
         .calls
@@ -3258,8 +3258,13 @@ fn mixed_cycle_keeps_independent_inputs_and_outputs(world: &mut LifecycleWorld) 
         .expect("repeated a must be called");
     assert_eq!(
         input_versions(repeated_a),
+        ["c:feedback:3.c.feedback.artifact"]
+    );
+    let decision = world.calls.iter().find(|call| call.step_id == "c").unwrap();
+    assert_eq!(
+        input_versions(decision),
         [
-            "c:feedback:3.c.feedback.artifact",
+            "b:bridge:1.b.bridge.artifact",
             "side:context:2.side.context.artifact"
         ]
     );
@@ -3333,26 +3338,25 @@ fn first_cycle_history_is_immutable(world: &mut LifecycleWorld) {
     }
 }
 
-#[then("оба resume завершаются с кодом 1 и одинаковой диагностикой")]
+#[then("оба resume завершаются с кодом 3 и одинаковой диагностикой")]
 fn repeated_blocked_resume_is_stable(world: &mut LifecycleWorld) {
     let first = world
         .prior_observed
         .as_ref()
         .expect("scenario must execute first resume");
-    assert_eq!(first.exit_code, 1);
-    assert_eq!(world.observed().exit_code, 1);
+    assert_eq!(first.exit_code, 3);
+    assert_eq!(world.observed().exit_code, 3);
     assert_eq!(first.error, world.observed().error);
 }
 
-#[then("диагностика перечисляет отсутствующие source Steps c, b")]
+#[then("диагностика сообщает статическую недостижимость")]
 fn blocked_diagnostic_lists_missing_sources(world: &mut LifecycleWorld) {
     let error = world
         .observed()
         .error
         .as_deref()
         .expect("blocked resume must return diagnostics");
-    assert!(error.contains("blocked: отсутствуют source Steps c, b"));
-    assert_eq!(error.matches("source Steps").count(), 1);
+    assert!(error.contains("статически недостижим"));
 }
 
 #[then("Agent не запускался и durable run не изменился")]
@@ -3380,13 +3384,15 @@ fn exactly_one_ready_join_is_published(world: &mut LifecycleWorld) {
     assert_eq!(world.calls[0].attempt, 3);
 }
 
-#[then("stderr сообщает blocked и отсутствующие source Steps c, b")]
+#[then("stderr сообщает статическую недостижимость")]
 fn cli_reports_blocked_sources(world: &mut LifecycleWorld) {
-    assert_eq!(
-        world.observed().error.as_deref(),
-        Some(
-            "error: resume: run 0: blocked: отсутствуют source Steps c, b: workflow frontier blocked\n"
-        )
+    assert!(
+        world
+            .observed()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("статически недостижим")
     );
 }
 

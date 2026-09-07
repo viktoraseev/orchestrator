@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::domain::{Dependencies, Outputs};
+
 use super::Agent;
 
 /// Проверенный идентификатор workflow, безопасный для построения пути template.
@@ -68,8 +70,8 @@ pub(crate) struct Step {
     pub(crate) prompt: Option<String>,
     pub(crate) human: bool,
     pub(crate) process: Option<ProcessStep>,
-    pub(crate) depends_on: Vec<SymbolicId>,
-    pub(crate) outputs: Vec<SymbolicId>,
+    pub(crate) depends_on: Dependencies,
+    pub(crate) outputs: Outputs,
 }
 
 #[derive(Clone, Debug)]

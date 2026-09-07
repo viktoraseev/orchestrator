@@ -6,7 +6,7 @@ Feature: Восстановление durable run
     После получения Run lock и до запуска executor, вычисления frontier или durable publication resume полностью проверяет materialized workflow, все attempt records и artifacts завершённых attempts на соответствие format и workflow graph; любая ошибка завершает команду без запуска Agent и изменения durable-модели.
     Attempt record является regular YAML file с именем `<n>.<step-id>.attempt.yaml` и закрытым root mapping из обязательных sequences `input` и `events`; имя связывает record с глобальным номером и существующим Step, duplicate keys, неизвестные поля и нарушения типов запрещены.
     Каждый event является закрытым mapping: session activation содержит только `type: session-activated` и строковый `session-id`, completion — только `type: completed`; соседние session activations не повторяют ID, completed встречается не более одного раза и только последним.
-    Каждый completed attempt имеет ровно один regular artifact `<n>.<step-id>.<input-id>.artifact` для каждого объявленного output и не имеет дополнительных artifacts под своим durable-префиксом; отсутствие либо дополнительный InputId делает run противоречивым.
+    Каждый completed attempt имеет ровно один regular artifact `<n>.<step-id>.<input-id>.artifact` для каждого output выбранного допустимого набора и не имеет дополнительных artifacts под своим durable-префиксом; набор вне outputs expression делает run противоречивым.
     После успешной проверки состояния running, paused и completed вычисляются из validated workflow, record и artifacts и отдельными полями не сохраняются.
 
     Scenario Outline: Ошибка любого связанного durable-факта возвращает код 3
@@ -83,7 +83,7 @@ Feature: Восстановление durable run
 
   @cli:resume
   Rule: Файловые остатки незавершённого attempt не входят в durable-модель
-    Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не участвуют в validation, recovery или workflow graph и не удаляются автоматически.
+    Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не участвуют в validation, recovery или workflow graph и не удаляются при чтении; при успешной публикации completion остатки невыбранных outputs того же attempt удаляются до durable completed.
 
     Scenario: Resume игнорирует и не удаляет temp и orphan artifacts
       Given подготовлен незавершённый durable run с crash leftovers

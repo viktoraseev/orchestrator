@@ -73,6 +73,7 @@ impl AttemptRecord {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DurableAttempt {
+    pub(crate) outputs: Vec<String>,
     pub(crate) number: u64,
     pub(crate) step_index: usize,
     pub(crate) record: AttemptRecord,

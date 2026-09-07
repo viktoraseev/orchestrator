@@ -365,10 +365,11 @@ fn read_process_outputs(
         let path = paths
             .get(output)
             .ok_or_else(|| invalid_run(run_id, "Process output mapping неполон"))?;
-        let metadata = fs::metadata(path).map_err(|source| CommandError::Runtime {
-            context: format!("run {run_id}: Process не создал обязательный output '{output}'"),
-            source,
-        })?;
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(runtime("run", "Process output metadata", source)),
+        };
         if !metadata.is_file() {
             return Err(CommandError::Runtime {
                 context: format!(
@@ -387,6 +388,11 @@ fn read_process_outputs(
         })?;
         outputs.insert(output.clone(), bytes);
     }
+    if !step.outputs.accepts(outputs.keys().map(String::as_str)) {
+        return Err(CommandError::Invalid {
+            context: format!("run {run_id}: Process outputs expression не выполнено"),
+        });
+    }
     Ok(CompletionCandidate(outputs))
 }
 
@@ -404,6 +410,7 @@ fn cleanup_process_outputs(paths: &BTreeMap<String, PathBuf>) {
     }
 }
 
+/// Использует только зафиксированные source numbers; отсутствующий обязательный placeholder и невалидный UTF-8 content отклоняются до публикации target, см. Rule «Линейный target получает зафиксированную версию source artifacts» в `features/graph_execution.feature`.
 pub(super) fn prepare_agent_input(
     directory: &Path,
     workflow: &MaterializedWorkflow,
@@ -411,22 +418,8 @@ pub(super) fn prepare_agent_input(
     run_id: RunId,
 ) -> Result<(Vec<AgentInput>, String), CommandError> {
     let step = &workflow.steps[attempt.step_index];
-    let mut inputs = Vec::new();
-    for (dependency, source_number) in step.depends_on.iter().zip(attempt.record.input()) {
-        let source = workflow
-            .steps
-            .iter()
-            .find(|candidate| candidate.id == *dependency)
-            .ok_or_else(|| invalid_run(run_id, "unknown dependency"))?;
-        inputs.reserve(source.outputs.len());
-        for input_id in &source.outputs {
-            inputs.push(AgentInput {
-                step_id: dependency.clone(),
-                input_id: input_id.clone(),
-                path: directory.join(format!("{source_number}.{dependency}.{input_id}.artifact")),
-            });
-        }
-    }
+    let inputs =
+        super::storage::input_artifacts(directory, workflow, attempt.record.input(), run_id)?;
     let prompt = render_prompt(step.prompt.as_deref().unwrap_or(""), &inputs, run_id)?;
     Ok((inputs, prompt))
 }

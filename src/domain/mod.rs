@@ -2,6 +2,10 @@
 
 mod agent;
 mod attempt;
+mod expression;
+mod graph;
+pub(crate) use expression::{Dependencies, Dependency, Expression, Outputs};
+pub(crate) use graph::{Graph, GraphStep};
 mod run;
 mod workflow;
 

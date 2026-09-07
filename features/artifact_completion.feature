@@ -2,7 +2,7 @@ Feature: Публикация Agent completion и artifacts
   Artifact — версионируемый результат с durable-ключом `(attempt-n, step-id, input-id)`; source-файлы остаются во владении Agent, а workflow видит только полный неизменяемый набор последнего принятого completion после возврата Agent.
 
   Rule: Attempt complete принимает полный snapshot объявленных outputs
-    Каждый вызов передаёт по одному absolute path на доступный regular file для каждого output либо пустой набор для Step без outputs; source может находиться вне run и быть symbolic link, а parent синхронно копирует его bytes в volatile-кандидат без переноса source-файла.
+    Каждый вызов передаёт по одному absolute path на доступный regular file для каждого output выбранного допустимого полного набора либо пустой набор для Step без outputs; source может находиться вне run и быть symbolic link, а parent синхронно копирует его bytes в volatile-кандидат без переноса source-файла.
     После возврата Agent каждый artifact публикуется как regular file с точным durable-именем `<attempt-n>.<step-id>.<input-id>.artifact`; InputId берётся только из `outputs` Step, суффикс не задаёт формат, а произвольные bytes сохраняются без преобразования.
 
     Scenario: Step без outputs принимает пустой completion

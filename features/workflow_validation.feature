@@ -21,7 +21,7 @@ Feature: Validation workflow
 
   Rule: Структура workflow проверяется до ссылок и graph
     Source workflow является YAML mapping с optional `parameters` и обязательной непустой ordered sequence `steps`; parameters сопоставляет уникальные ParameterIds единственному type `string`, а каждый Step содержит только `id`, optional `agent`, optional `prompt`, optional `process`, обязательные `human`, `depends-on` и `outputs`.
-    StepIds уникальны, `depends-on` и `outputs` являются sequences уникальных symbolic IDs и могут быть пустыми; duplicate mapping keys, неизвестные поля и нарушения типов отклоняются до проверки ссылок.
+    StepIds уникальны, `depends-on` и `outputs` являются sequences выражений all/one-of со symbolic IDs и могут быть пустыми; OutputIds уникальны во всём выражении; duplicate mapping keys, неизвестные поля и нарушения типов отклоняются до проверки ссылок.
 
     Scenario Outline: Невалидная структура workflow отклоняется
       Given подготовлен кандидат workflow "<candidate>"
@@ -87,7 +87,7 @@ Feature: Validation workflow
         | Prompt не regular file             | не является regular file |
 
   Rule: Reachability учитывает bootstrap первого Step и полные dependency groups
-    Первый Step статически достижим initial activation, следующий Step — только когда достижимы все его dependencies; non-entry Step без dependencies и cycle без bootstrap-пути не имеют activation path и отклоняются.
+    Первый Step статически достижим initial activation, следующий Step — когда достижима хотя бы одна согласованная альтернатива его dependencies; non-entry Step без dependencies и cycle без bootstrap-пути не имеют activation path и отклоняются.
 
     Scenario Outline: Недостижимый graph отклоняется
       Given подготовлен кандидат workflow "<candidate>"

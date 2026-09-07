@@ -13,6 +13,8 @@ use std::thread;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::Outputs;
+
 use super::storage::{attempt_name, publish_bytes, publish_yaml, read_yaml};
 use super::{TEMP_SEQUENCE, runtime};
 use crate::agent::AttemptControl;
@@ -28,7 +30,7 @@ pub(super) struct ControlState {
     pub(super) attempt: u64,
     pub(super) run_directory: PathBuf,
     pub(super) step_id: String,
-    pub(super) outputs: Vec<String>,
+    pub(super) outputs: Outputs,
     pub(super) record: AttemptRecord,
     pub(super) candidate: Option<CompletionCandidate>,
     pub(super) storage: Arc<Mutex<()>>,
@@ -120,7 +122,7 @@ pub(super) fn accept_completion(
         })?;
         bytes.insert(input_id.clone(), content);
     }
-    if found.len() != expected.len() {
+    if !state.outputs.accepts(found.iter().copied()) {
         return Err(CommandError::Invalid {
             context: "attempt complete: набор InputIds не совпадает с outputs Step".to_owned(),
         });
@@ -129,12 +131,29 @@ pub(super) fn accept_completion(
     Ok(())
 }
 
+/// Под storage lock заменяет неподтверждённые artifacts выбранным snapshot и последним публикует completed; до этой точки resume игнорирует файлы attempt, см. Rule «Completion выбирает допустимый полный набор outputs» в `features/conditional_graph.feature`.
 pub(super) fn finalize_completion(
     directory: &Path,
     attempt: u64,
     step: &MaterializedStep,
     candidate: CompletionCandidate,
 ) -> Result<(), CommandError> {
+    for output in &step.outputs {
+        if !candidate.0.contains_key(output) {
+            let path = directory.join(format!("{attempt}.{}.{output}.artifact", step.id));
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(runtime(
+                        "attempt complete",
+                        "не удалось удалить неопубликованный artifact",
+                        source,
+                    ));
+                }
+            }
+        }
+    }
     for (input_id, bytes) in candidate.0 {
         publish_bytes(
             directory,

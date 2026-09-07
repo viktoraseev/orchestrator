@@ -112,7 +112,7 @@ Feature: Исполнение произвольных процессов в wor
 
   @cli:коды-завершения
   Rule: Process completion проходит через durable artifact commit
-    После exit code 0 supervisor проверяет, что каждый объявленный output существует и является regular file, полностью читает staging files и публикует artifacts и completed через ту же commit-точку, что Agent completion; отсутствующий или невалидный output является runtime failure без terminal event.
+    После exit code 0 supervisor читает существующие staging files и проверяет точное соответствие outputs expression; невалидный набор возвращает код 3 без terminal event, non-regular файл остаётся runtime failure, а валидный snapshot публикуется через ту же commit-точку, что Agent completion.
 
     @process
     Scenario: Stdout Process публикуется как объявленный artifact
@@ -124,8 +124,26 @@ Feature: Исполнение произвольных процессов в wor
     Scenario: Успешный Process без обязательного output не завершает attempt
       Given подготовлен Process Step создающий только один из двух объявленных outputs
       When запускается workflow с Process Step
-      Then команда завершается runtime error и attempt не завершён
+      Then команда завершается кодом 3 и attempt не завершён
       And Process artifacts не опубликованы
+
+    @process
+    Scenario Outline: Process выбирает условную ветвь созданными файлами
+      Given подготовлен Process с условным набором "<choice>"
+      When запускается workflow с Process Step
+      Then Process возвращает код <code> и публикует "<artifacts>"
+      Examples:
+        | choice | code | artifacts     |
+        | review | 0    | report,review |
+        | done   | 0    | report,done   |
+        | both   | 3    |               |
+        | none   | 3    |               |
+
+    @process
+    Scenario: Resume Process не выбирает ветвь по остаткам предыдущего запуска
+      Given подготовлен Process с условным набором "retry"
+      When Process завершается ошибкой после review и продолжается с done
+      Then Process возвращает код 0 и публикует "report,done"
 
     @process
     Scenario: Успешный Process с non-regular output не завершает attempt

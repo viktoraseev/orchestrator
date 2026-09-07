@@ -540,6 +540,16 @@ fn first_process_run(world: &mut ProcessWorld) {
 #[then("команда завершается runtime error и attempt не завершён")]
 fn runtime_incomplete(world: &mut ProcessWorld) {
     assert_eq!(world.observed().code, 1);
+    assert_incomplete(world);
+}
+
+#[then("команда завершается кодом 3 и attempt не завершён")]
+fn invalid_incomplete(world: &mut ProcessWorld) {
+    assert_eq!(world.observed().code, 3);
+    assert_incomplete(world);
+}
+
+fn assert_incomplete(world: &ProcessWorld) {
     let record = fs::read_to_string(run_directory(world).join("0.execute.attempt.yaml"))
         .expect("attempt must be readable");
     assert!(!record.contains("completed"));
@@ -548,6 +558,62 @@ fn runtime_incomplete(world: &mut ProcessWorld) {
             .join("0.execute.result.artifact")
             .exists()
     );
+}
+
+#[given(expr = "подготовлен Process с условным набором {string}")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Cucumber разбирает аргументы через FromStr"
+)]
+fn conditional_process(world: &mut ProcessWorld, choice: String) {
+    let root = prepare_root(world);
+    let body = format!(
+        "#!/bin/sh\nset -eu\nfor p in \"$@\"; do test ! -e \"$p\"; done\nprintf report > \"$1\"\ncase '{choice}' in\nreview) : > \"$2\" ;;\ndone) : > \"$3\" ;;\nboth) : > \"$2\"; : > \"$3\" ;;\nnone) : ;;\nretry) if test ! -e \"$ORC_HOME/retried\"; then : > \"$ORC_HOME/retried\"; : > \"$2\"; exit 7; fi; : > \"$3\" ;;\nesac\n"
+    );
+    let command = executable(root, "conditional.sh", &body);
+    fs::write(root.join("workflow/delivery.yaml"), format!("steps:\n- id: execute\n  process:\n    executable: {}\n    args: ['{{{{output:report}}}}', '{{{{output:review}}}}', '{{{{output:done}}}}']\n  human: false\n  depends-on: []\n  outputs: [report, {{one-of: [review, done]}}]\n", command.display())).unwrap();
+}
+
+#[when("Process завершается ошибкой после review и продолжается с done")]
+fn retry_conditional_process(world: &mut ProcessWorld) {
+    run_cli(world, &["start", "delivery"]);
+    assert_eq!(world.observed().code, 1);
+    fs::write(
+        run_directory(world).join("0.execute.review.artifact"),
+        "crash remainder",
+    )
+    .unwrap();
+    let run_id = world.run_id.clone().unwrap();
+    run_cli(world, &["resume", &run_id]);
+}
+
+#[then(expr = "Process возвращает код {int} и публикует {string}")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Cucumber разбирает аргументы через FromStr"
+)]
+fn conditional_process_result(world: &mut ProcessWorld, code: i32, expected: String) {
+    assert_eq!(world.observed().code, code, "{}", world.observed().stderr);
+    let mut actual = fs::read_dir(run_directory(world))
+        .unwrap()
+        .map(Result::unwrap)
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()?
+                .strip_prefix("0.execute.")?
+                .strip_suffix(".artifact")
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    actual.sort();
+    let mut expected = expected
+        .split(',')
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(actual, expected);
 }
 
 #[then("exit code Process не записан и автоматический restart не выполнен")]

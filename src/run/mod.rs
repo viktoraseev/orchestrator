@@ -2,6 +2,7 @@
 
 mod control;
 mod executor;
+mod frontier;
 mod inspection;
 mod scheduler;
 mod storage;
@@ -409,7 +410,7 @@ mod tests {
             attempt: 0,
             run_directory: root.path().to_owned(),
             step_id: "step".to_owned(),
-            outputs: vec!["result".to_owned()],
+            outputs: vec!["result".to_owned()].into(),
             record: AttemptRecord::pending(Vec::new()),
             candidate: None,
             storage: Arc::new(Mutex::new(())),

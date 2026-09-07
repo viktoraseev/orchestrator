@@ -4,9 +4,9 @@ Feature: Выполнение workflow graph
   Rule: Линейный target получает зафиксированную версию source artifacts
     Scheduling создаёт attempt только для ready activation и первой durable-публикацией навсегда фиксирует выбранные source attempts; Agent получает UTF-8 prompt и input mapping с artifact-ключами `(source-step-id, input-id)`.
     Attempt record получает номер и StepId только из имени `<attempt-n>.<step-id>.attempt.yaml`, а из workflow — executor, prompt, dependencies и outputs; сам record хранит только sequence номеров выбранных source attempts в `input` и ordered `events`.
-    Input mapping принадлежит target attempt, содержит по одному выбранному source attempt для каждого dependency в порядке `depends-on` и передаёт все outputs успешно завершённого source attempt как `(source-step-id, input-id) → artifact path`; отдельной сущности Input нет, а одинаковые InputId разных source Steps различаются по StepId.
+    Input mapping принадлежит target attempt, содержит по одному выбранному source attempt для каждого выбранного source в порядке первого выбранного листа `depends-on` и передаёт все outputs успешно завершённого source attempt как `(source-step-id, input-id) → artifact path`; отдельной сущности Input нет, а одинаковые InputId разных source Steps различаются по StepId.
     Durable artifact имеет ключ `(attempt-n, step-id, input-id)`, все его версии сохраняются для истории, а поздние versions не меняют input mapping, prompt или argv уже созданного attempt.
-    При создании и восстановлении attempt input содержит ровно один существующий успешно завершённый source attempt для каждого Step в порядке `depends-on`; source number меньше target number, свежее нижней границы предыдущей activation и имеет artifact для каждого объявленного output.
+    При создании и восстановлении attempt input является согласованным выбранным набором успешно завершённых source attempts; source number меньше target number, input group не повторяет уже созданный attempt этого target, а опубликованные artifacts удовлетворяют outputs expression.
     Неполная, старая или противоречивая input group отклоняется fail-fast, а опубликованные source numbers остаются неизменяемыми.
 
     Scenario: Target получает path, content и durable input source attempt
@@ -25,9 +25,9 @@ Feature: Выполнение workflow graph
 
   @cli:resume
   Rule: Fan-out и fan-in frontier вычисляется из durable attempts
-    Workflow является ориентированным графом упорядоченных Steps; каждый Step исполняется ровно одним Agent или Process executor, а `depends-on` задаёт зависимости от успешно завершённых source Steps, включая Steps без outputs, но не от отдельных artifacts.
-    Успешное завершение source Step открывает безусловный fan-out во все target Steps; условий `when` и выбора ветви по artifacts нет.
-    Frontier вычисляется из durable attempts, содержит каждый ready Step не более одного раза и требует для каждого dependency успешно завершённую source version новее выбранной предыдущей activation нижней границы.
+    Workflow является ориентированным графом упорядоченных Steps; каждый Step исполняется ровно одним Agent или Process executor, а `depends-on` задаёт зависимости от успешно завершённых source Steps, включая Steps без outputs, а qualified dependencies требуют указанный artifact.
+    Успешное завершение source Step открывает fan-out только в target Steps с удовлетворённым depends-on; выбор ветви задают опубликованные artifacts без условий when и новых outcome.
+    Frontier вычисляется из durable attempts и содержит каждый ready Step не более одного раза; target ожидает разрешения выбранных зависимостей, а неизменившиеся внешние inputs переиспользуются.
     У Step существует не более одного незавершённого attempt; новые dependency versions не создают параллельную activation, а после completion следующий pass выбирает последние доступные versions и сохраняет промежуточные в истории.
 
     Scenario: Diamond graph создаёт fan-out в порядке Steps и затем fan-in
@@ -46,8 +46,8 @@ Feature: Выполнение workflow graph
   @cli:resume
   Rule: Циклический workflow повторно активирует Steps по свежим artifacts
     Start создаёт bootstrap activation первого описанного Step как attempt 0 с пустым input; его `depends-on` игнорируется только один раз и применяется при повторных activations.
-    Новая activation выбирает для каждого dependency уже завершённый source attempt с максимальным номером меньше собственного, фиксирует выбранные numbers навсегда и не может повторно использовать нижнюю границу предыдущей activation.
-    У цикла нет общего input или output: его Step может одновременно получать feedback и artifact от Step вне цикла, а outputs участников могут независимо питать Steps внутри и вне цикла.
+    Новая activation выбирает согласованные опубликованные source versions с номерами меньше собственного, фиксирует выбранные numbers навсегда и не создаётся повторно для уже обработанной input group.
+    Повторяемый участок имеет один вход и одну точку решения после выбранных ветвей; внешний контекст переиспользуется, а внешние consumers получают результат решающего Step.
 
     Scenario: Первый повторный обход использует feedback вместо bootstrap input
       Given подготовлен циклический workflow a → b → c → a
@@ -71,18 +71,18 @@ Feature: Выполнение workflow graph
       When mixed cycle завершает повторный a и доходит до следующего незавершённого b
       Then lifecycle завершается с кодом 1
       And mixed cycle создал attempts 0 a, 1 b, 2 side, 3 c, 4 a, 5 sink, 6 b, 7 side
-      And повторный a получает feedback c и context side, а sink получает feedback c
+      And c объединяет b и side, а повторный a и sink получают feedback c
 
   @cli:resume @cli:коды-завершения
-  Rule: Частично удовлетворённая dependency group блокирует run детерминированно
+  Rule: Взаимные ожидания вне разрешённой структуры отклоняются детерминированно
     Step является terminal, если его ID отсутствует во всех `depends-on`; run completed только при отсутствии работающих и незавершённых attempts, ready activations и частично удовлетворённых dependency groups.
-    Dependency group частично удовлетворена, если свеж хотя бы один, но не все source attempts; такой run является blocked, а не completed.
+    Невыбранные условные ветви не блокируют run; недостижимые взаимные ожидания и неразрешённые циклы отклоняются при validation source или durable workflow.
 
-    Scenario: Повторный resume сохраняет blocked run без побочных эффектов
-      Given подготовлен durable run с частично удовлетворёнными dependency groups
-      When blocked run дважды продолжается через lifecycle API
-      Then оба resume завершаются с кодом 1 и одинаковой диагностикой
-      And диагностика перечисляет отсутствующие source Steps c, b
+    Scenario: Повторный resume отклоняет недопустимые взаимные циклы без побочных эффектов
+      Given подготовлен durable run с недопустимыми взаимными циклами
+      When невалидный циклический run дважды продолжается через lifecycle API
+      Then оба resume завершаются с кодом 3 и одинаковой диагностикой
+      And диагностика сообщает статическую недостижимость
       And Agent не запускался и durable run не изменился
 
     Scenario: Полная dependency group создаёт ровно один target attempt
@@ -92,12 +92,12 @@ Feature: Выполнение workflow graph
       And создан ровно один join attempt с input 1, 2
 
     @process
-    Scenario: CLI возвращает стабильную blocked-диагностику
-      Given подготовлен durable run с частично удовлетворёнными dependency groups
+    Scenario: CLI возвращает стабильную диагностику недопустимого цикла
+      Given подготовлен durable run с недопустимыми взаимными циклами
       And process Agent не должен запускаться
-      When blocked run продолжается через CLI
-      Then lifecycle завершается с кодом 1
-      And stderr сообщает blocked и отсутствующие source Steps c, b
+      When невалидный циклический run продолжается через CLI
+      Then lifecycle завершается с кодом 3
+      And stderr сообщает статическую недостижимость
 
   @cli:коды-завершения
   Rule: Non-human attempts выполняются параллельно под общим лимитом

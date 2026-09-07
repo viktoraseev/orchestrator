@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::{Dependencies, Outputs};
+
 use super::{Agent, SymbolicId, Workflow};
 use crate::agent::AgentRegistry;
 use crate::config::CommandError;
@@ -53,8 +55,8 @@ pub(crate) struct MaterializedStep {
     pub(crate) prompt: Option<String>,
     pub(crate) human: bool,
     pub(crate) process: Option<MaterializedProcess>,
-    pub(crate) depends_on: Vec<String>,
-    pub(crate) outputs: Vec<String>,
+    pub(crate) depends_on: Dependencies,
+    pub(crate) outputs: Outputs,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -86,16 +88,8 @@ impl MaterializedWorkflow {
                         cwd: process.cwd,
                         stdout: process.stdout.map(SymbolicId::into_string),
                     }),
-                    depends_on: step
-                        .depends_on
-                        .into_iter()
-                        .map(super::SymbolicId::into_string)
-                        .collect(),
-                    outputs: step
-                        .outputs
-                        .into_iter()
-                        .map(super::SymbolicId::into_string)
-                        .collect(),
+                    depends_on: step.depends_on,
+                    outputs: step.outputs,
                 })
                 .collect(),
         }
@@ -147,22 +141,27 @@ impl MaterializedWorkflow {
             }
         }
         for step in &self.steps {
-            let dependencies: HashSet<&str> = step.depends_on.iter().map(String::as_str).collect();
-            if dependencies.len() != step.depends_on.len()
-                || step
-                    .depends_on
-                    .iter()
-                    .any(|dependency| !ids.contains(dependency.as_str()))
-            {
-                return Err("depends-on повторяется или ссылается на неизвестный Step".to_owned());
-            }
             if let Some(process) = &step.process {
                 for argument in &process.args {
                     self.validate_process_argument(step, argument)?;
                 }
             }
         }
+        self.graph()?;
         Ok(())
+    }
+
+    pub(crate) fn graph(&self) -> Result<super::Graph<'_>, String> {
+        super::Graph::validate(
+            self.steps
+                .iter()
+                .map(|step| super::GraphStep {
+                    id: &step.id,
+                    depends_on: &step.depends_on,
+                    outputs: &step.outputs,
+                })
+                .collect(),
+        )
     }
 
     fn validate_process_argument(

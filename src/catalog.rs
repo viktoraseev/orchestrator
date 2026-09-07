@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::domain::{Dependencies, Outputs};
+
 use crate::agent::BuiltinAgentRegistry;
 use crate::config::{CommandError, ProcessEnvironment, read_config, resolve_state_root};
 use crate::domain::SymbolicId;
@@ -80,8 +82,8 @@ pub struct SourceWorkflowStep {
     prompt: Option<String>,
     human: bool,
     process: Option<SourceWorkflowProcess>,
-    depends_on: Vec<String>,
-    outputs: Vec<String>,
+    depends_on: Dependencies,
+    outputs: Outputs,
 }
 
 /// Source Process executor без разрешения executable и placeholders.
@@ -154,13 +156,20 @@ impl SourceWorkflowStep {
     /// Возвращает source dependencies в исходном order.
     #[must_use]
     pub fn depends_on(&self) -> &[String] {
+        self.depends_on.sources()
+    }
+
+    pub(crate) fn dependencies(&self) -> &Dependencies {
         &self.depends_on
+    }
+    pub(crate) fn output_expression(&self) -> &Outputs {
+        &self.outputs
     }
 
     /// Возвращает source outputs в исходном order.
     #[must_use]
     pub fn outputs(&self) -> &[String] {
-        &self.outputs
+        self.outputs.ids()
     }
 }
 
@@ -571,9 +580,8 @@ fn validate_source_steps(
                 "Process Step несовместим с agent, prompt и human: true",
             ));
         }
-        let depends_on =
-            parse_source_ids(workflow, index, &id, "depends-on", "StepId", raw.depends_on)?;
-        let outputs = parse_source_ids(workflow, index, &id, "outputs", "InputId", raw.outputs)?;
+        let depends_on = raw.depends_on;
+        let outputs = raw.outputs;
         if let Some(stdout) = process.as_ref().and_then(SourceWorkflowProcess::stdout)
             && !outputs.iter().any(|output| output == stdout)
         {
@@ -704,30 +712,6 @@ fn validate_source_process_argument(
     }
 }
 
-fn parse_source_ids(
-    workflow: &str,
-    index: usize,
-    step_id: &str,
-    field: &str,
-    kind: &str,
-    values: Vec<String>,
-) -> Result<Vec<String>, CommandError> {
-    let mut unique = HashSet::with_capacity(values.len());
-    let mut parsed = Vec::with_capacity(values.len());
-    for value in values {
-        let value = parse_source_id(workflow, index, kind, &value)?;
-        if !unique.insert(value.clone()) {
-            return Err(invalid_source_step(
-                workflow,
-                step_id,
-                &format!("{field} содержит повтор '{value}'"),
-            ));
-        }
-        parsed.push(value);
-    }
-    Ok(parsed)
-}
-
 fn parse_source_id(
     workflow: &str,
     index: usize,
@@ -800,8 +784,8 @@ fn render_source_workflow(workflow: &SourceWorkflow) -> Result<String, CommandEr
                 process.args.len(),
                 process.cwd.as_deref().unwrap_or("-"),
                 process.stdout.as_deref().unwrap_or("-"),
-                joined_or_dash(&step.depends_on),
-                joined_or_dash(&step.outputs)
+                step.depends_on.text(),
+                step.outputs.text()
             )
             .map_err(text_format_error)?;
         } else {
@@ -812,8 +796,8 @@ fn render_source_workflow(workflow: &SourceWorkflow) -> Result<String, CommandEr
                 step.agent.as_deref().unwrap_or("-"),
                 step.prompt.as_deref().unwrap_or("-"),
                 step.human,
-                joined_or_dash(&step.depends_on),
-                joined_or_dash(&step.outputs)
+                step.depends_on.text(),
+                step.outputs.text()
             )
             .map_err(text_format_error)?;
         }
@@ -827,14 +811,6 @@ fn render_agent(agent: &AgentCatalogEntry) -> String {
         "agent {}: type={} model={} reasoning={}",
         agent.agent, agent.agent_type, agent.model, agent.reasoning
     )
-}
-
-fn joined_or_dash(values: &[String]) -> String {
-    if values.is_empty() {
-        "-".to_owned()
-    } else {
-        values.join(",")
-    }
 }
 
 fn text_format_error(source: std::fmt::Error) -> CommandError {

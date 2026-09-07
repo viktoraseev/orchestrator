@@ -7,7 +7,7 @@ use std::thread;
 
 use serde::Serialize;
 
-use super::scheduler::{Frontier, compute_frontier};
+use super::frontier::{Frontier, compute_frontier};
 #[cfg(test)]
 use super::storage::load_run_snapshot_with_hook;
 use super::storage::{RunSnapshot, artifact_size, list_run_ids, load_run_snapshot, open_artifact};
@@ -650,7 +650,7 @@ pub fn open_run_artifact(
             ),
         });
     }
-    if !step.outputs.iter().any(|output| output == input_id) {
+    if !attempt.outputs.iter().any(|output| output == input_id) {
         return Err(CommandError::NotFound {
             context: format!(
                 "run artifact: run {run_id}: InputId '{input_id}' не объявлен attempt {attempt_number}"
@@ -746,7 +746,7 @@ impl InspectedRun {
             .filter(|attempt| attempt.record.is_completed())
         {
             let step = &self.workflow.steps[attempt.step_index];
-            for input in &step.outputs {
+            for input in &attempt.outputs {
                 let path = self
                     .directory
                     .join(format!("{}.{}.{input}.artifact", attempt.number, step.id));

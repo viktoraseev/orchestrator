@@ -25,10 +25,10 @@ Feature: Read-only inspection durable runs
 
     @process
     Scenario: Числовые runs перечисляются по RunId с вычисленным состоянием, а остальные entries игнорируются
-      Given подготовлены active, blocked и completed durable runs и нечисловые entries
+      Given подготовлены active, закрытый условный и completed durable runs и нечисловые entries
       When запускается orchestrator run list
       Then inspection завершается с кодом 0
-      And text list содержит по одной отсортированной summary-строке для active, blocked и completed
+      And text list содержит по одной отсортированной summary-строке для active, закрытого условного и completed
       And inspection не изменил durable state
 
     @process
@@ -49,7 +49,7 @@ Feature: Read-only inspection durable runs
 
     @process
     Scenario: State filters объединяются как OR, workflow как AND, а повторы идемпотентны
-      Given подготовлены active, blocked и completed durable runs
+      Given подготовлены active, закрытый условный и completed durable runs
       When запускается orchestrator run list с active, completed, completed и workflow completed
       Then inspection завершается с кодом 0
       And inspection output содержит только completed run
@@ -99,7 +99,7 @@ Feature: Read-only inspection durable runs
 
     @process
     Scenario: Бинарный artifact копируется без преобразования
-      Given подготовлен completed run с двумя версиями бинарного artifact
+      Given подготовлен run с двумя завершёнными версиями бинарного artifact
       When запускается orchestrator run artifact 30 0 result
       Then inspection завершается с кодом 0
       And stdout побайтово равен первой версии artifact
@@ -107,7 +107,7 @@ Feature: Read-only inspection durable runs
 
     @process
     Scenario Outline: Неизвестный или неопубликованный artifact не даёт частичный stdout
-      Given подготовлен completed run с двумя версиями бинарного artifact
+      Given подготовлен run с двумя завершёнными версиями бинарного artifact
       When запускается orchestrator run artifact 30 <attempt> <input>
       Then inspection завершается с кодом <code>
       And inspection output пуст
@@ -116,13 +116,13 @@ Feature: Read-only inspection durable runs
         | attempt | input   | code |
         | 99      | result  | 4    |
         | 0       | missing | 4    |
-        | 1       | result  | 4    |
+        | 3       | result  | 4    |
 
   @cli:read-only-run-inspection
   Rule: Run artifacts перечисляет только опубликованные версии
 
     Scenario: Typed API возвращает artifact descriptors
-      Given подготовлен completed run с двумя версиями бинарного artifact
+      Given подготовлен run с двумя завершёнными версиями бинарного artifact
       When строится typed inspection snapshot run 30 через публичный API
       Then inspection завершается с кодом 0
       And typed snapshot содержит две версии result
@@ -130,7 +130,7 @@ Feature: Read-only inspection durable runs
 
     @process
     Scenario: Completed artifacts перечисляются в deterministic order
-      Given подготовлен completed run с двумя версиями бинарного artifact
+      Given подготовлен run с двумя завершёнными версиями бинарного artifact
       When запускается orchestrator run artifacts 30
       Then inspection завершается с кодом 0
       And список artifacts содержит две опубликованные версии
@@ -155,7 +155,7 @@ Feature: Read-only inspection durable runs
 
     @process
     Scenario: Text является default renderer списка
-      Given подготовлены active, blocked и completed durable runs
+      Given подготовлены active, закрытый условный и completed durable runs
       When запускается orchestrator run list для completed workflow
       Then inspection завершается с кодом 0
       And inspection output содержит только completed run

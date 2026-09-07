@@ -251,6 +251,13 @@ pub(super) fn load_attempts(
         attempts.push(DurableAttempt {
             number,
             step_index,
+            outputs: validate_record(
+                &record,
+                &workflow.steps[step_index],
+                number,
+                directory,
+                run_id,
+            )?,
             record,
         });
     }
@@ -282,12 +289,42 @@ pub(super) fn load_attempts(
         }
     }
     for attempt in &attempts {
-        let step = &workflow.steps[attempt.step_index];
-        validate_record(&attempt.record, step, attempt.number, directory, run_id)?;
         validate_attempt_input(workflow, &attempts, attempt, run_id)?;
         prepare_agent_input(directory, workflow, attempt, run_id)?;
     }
     Ok(attempts)
+}
+
+/// Читает artifact mapping после validation; lifecycle удерживает run lock, inspection проверяет fingerprint до и после чтения, source Step определяется durable-именем attempt, выбранные outputs — опубликованными файлами, см. Rule «Qualified dependencies выбирают artifacts одной завершённой source version» в `features/conditional_graph.feature`.
+pub(super) fn input_artifacts(
+    directory: &Path,
+    workflow: &MaterializedWorkflow,
+    input: &[u64],
+    run_id: RunId,
+) -> Result<Vec<crate::agent::AgentInput>, CommandError> {
+    let mut inputs = Vec::new();
+    for source_number in input {
+        let source = workflow
+            .steps
+            .iter()
+            .find(|candidate| {
+                directory
+                    .join(attempt_name(*source_number, &candidate.id))
+                    .is_file()
+            })
+            .ok_or_else(|| invalid_run(run_id, "unknown dependency"))?;
+        for input_id in &source.outputs {
+            let path = directory.join(format!("{source_number}.{}.{input_id}.artifact", source.id));
+            if path.is_file() {
+                inputs.push(crate::agent::AgentInput {
+                    step_id: source.id.clone(),
+                    input_id: input_id.clone(),
+                    path,
+                });
+            }
+        }
+    }
+    Ok(inputs)
 }
 
 fn validate_attempt_input(
@@ -300,67 +337,92 @@ fn validate_attempt_input(
         return Ok(());
     }
     let step = &workflow.steps[attempt.step_index];
-    if attempt.record.input().len() != step.depends_on.len() {
+    let mut chosen = std::collections::HashMap::new();
+    for number in attempt.record.input() {
+        let source = attempts
+            .iter()
+            .find(|source| source.number == *number)
+            .ok_or_else(|| {
+                invalid_run(run_id, "attempt input ссылается на отсутствующий source")
+            })?;
+        if source.number >= attempt.number
+            || !source.record.is_completed()
+            || chosen
+                .insert(workflow.steps[source.step_index].id.as_str(), source)
+                .is_some()
+        {
+            return Err(invalid_run(
+                run_id,
+                "attempt input ссылается на неготовый или повторный source",
+            ));
+        }
+    }
+    let valid = step.depends_on.alternatives().iter().any(|leaves| {
+        let mut input = Vec::new();
+        for leaf in leaves {
+            let Some(source) = chosen.get(leaf.step()) else {
+                return false;
+            };
+            if leaf
+                .output()
+                .is_some_and(|output| !source.outputs.iter().any(|id| id == output))
+            {
+                return false;
+            }
+            if !input.contains(&source.number) {
+                input.push(source.number);
+            }
+        }
+        input == attempt.record.input()
+    });
+    if !valid {
         return Err(invalid_run(
             run_id,
             "attempt input не совпадает с depends-on",
         ));
     }
-    let previous = attempts
-        .iter()
-        .filter(|candidate| {
-            candidate.step_index == attempt.step_index && candidate.number < attempt.number
-        })
-        .max_by_key(|candidate| candidate.number);
-    for (dependency_index, (dependency, source_number)) in step
-        .depends_on
-        .iter()
-        .zip(attempt.record.input())
-        .enumerate()
-    {
-        let source_index = workflow
-            .steps
-            .iter()
-            .position(|candidate| candidate.id == *dependency)
-            .ok_or_else(|| invalid_run(run_id, "unknown dependency"))?;
-        let source = attempts
-            .iter()
-            .find(|candidate| candidate.number == *source_number)
-            .ok_or_else(|| {
-                invalid_run(run_id, "attempt input ссылается на отсутствующий source")
-            })?;
-        if source.step_index != source_index
-            || !source.record.is_completed()
-            || source.number >= attempt.number
-        {
-            return Err(invalid_run(
-                run_id,
-                "attempt input ссылается на неготовый source",
-            ));
+    if attempts.iter().any(|previous| {
+        previous.step_index == attempt.step_index
+            && previous.number < attempt.number
+            && previous.record.input() == attempt.record.input()
+    }) {
+        return Err(invalid_run(
+            run_id,
+            "attempt input повторно использует старую input group",
+        ));
+    }
+    let graph = workflow
+        .graph()
+        .map_err(|message| invalid_run(run_id, &message))?;
+    if let Some(region) = graph.repeat.as_ref() {
+        if region.members.contains(&attempt.step_index) && attempt.step_index != region.entry {
+            let epoch = attempts
+                .iter()
+                .filter(|source| {
+                    source.step_index == region.entry && source.number < attempt.number
+                })
+                .map(|source| source.number)
+                .max();
+            if chosen.values().any(|source| {
+                region.members.contains(&source.step_index)
+                    && epoch.is_none_or(|epoch| source.number < epoch)
+            }) {
+                return Err(invalid_run(
+                    run_id,
+                    "attempt input относится к предыдущему выполнению участка",
+                ));
+            }
         }
-        let latest = attempts
-            .iter()
-            .filter(|candidate| {
-                candidate.step_index == source_index
-                    && candidate.record.is_completed()
-                    && candidate.number < attempt.number
-            })
-            .map(|candidate| candidate.number)
-            .max();
-        if latest != Some(*source_number) {
-            return Err(invalid_run(
-                run_id,
-                "attempt input выбрал не последнюю source version",
-            ));
-        }
-        if previous
-            .and_then(|candidate| candidate.record.input().get(dependency_index))
-            .is_some_and(|bound| source_number <= bound)
-        {
-            return Err(invalid_run(
-                run_id,
-                "attempt input повторно использует старую source version",
-            ));
+        if attempt.step_index == region.entry || attempt.step_index == region.decision {
+            let prefix =
+                &attempts[..attempts.partition_point(|source| source.number < attempt.number)];
+            let frontier = super::frontier::compute_frontier(workflow, prefix)?;
+            if !frontier.ready.contains(&attempt.step_index) {
+                return Err(invalid_run(
+                    run_id,
+                    "решение или возврат опубликованы до завершения выбранных ветвей",
+                ));
+            }
         }
     }
     Ok(())
@@ -372,20 +434,12 @@ fn validate_record(
     attempt: u64,
     directory: &Path,
     run_id: RunId,
-) -> Result<(), CommandError> {
+) -> Result<Vec<String>, CommandError> {
+    let mut published = Vec::new();
     record
         .validate_history()
         .map_err(|message| invalid_run(run_id, message))?;
     if record.is_completed() {
-        for output in &step.outputs {
-            let artifact = directory.join(format!("{attempt}.{}.{output}.artifact", step.id));
-            if !artifact.is_file() {
-                return Err(invalid_run(
-                    run_id,
-                    &format!("отсутствует artifact {output}"),
-                ));
-            }
-        }
         let prefix = format!("{attempt}.{}.", step.id);
         for entry in fs::read_dir(directory).map_err(|source| {
             runtime(
@@ -402,16 +456,30 @@ fn validate_record(
             if let Some(input_id) = name
                 .strip_prefix(&prefix)
                 .and_then(|value| value.strip_suffix(".artifact"))
-                && !step.outputs.iter().any(|output| output == input_id)
             {
-                return Err(invalid_run(
-                    run_id,
-                    &format!("дополнительный artifact {input_id}"),
-                ));
+                if !step.outputs.iter().any(|output| output == input_id)
+                    || !entry
+                        .file_type()
+                        .map_err(|source| runtime("resume", "artifact metadata", source))?
+                        .is_file()
+                {
+                    return Err(invalid_run(
+                        run_id,
+                        &format!("дополнительный или невалидный artifact {input_id}"),
+                    ));
+                }
+                published.push(input_id.to_owned());
             }
         }
+        if !step.outputs.accepts(published.iter().map(String::as_str)) {
+            return Err(invalid_run(
+                run_id,
+                "отсутствует artifact либо outputs expression не выполнено",
+            ));
+        }
+        published.sort_by_key(|id| step.outputs.iter().position(|declared| declared == id));
     }
-    Ok(())
+    Ok(published)
 }
 
 pub(super) fn attempt_name(attempt: u64, step_id: &str) -> String {

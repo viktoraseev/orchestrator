@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::{Dependencies, Outputs};
+
 use crate::agent::{AgentRegistry, BuiltinAgentRegistry};
 use crate::config::{CommandError, ProcessEnvironment, RawConfig, read_config, resolve_state_root};
 use crate::domain::{Agent, ProcessStep, Step, SymbolicId, Workflow};
@@ -62,8 +64,8 @@ pub(crate) struct RawStep {
     pub(crate) prompt: Option<String>,
     pub(crate) process: Option<RawProcess>,
     pub(crate) human: bool,
-    pub(crate) depends_on: Vec<String>,
-    pub(crate) outputs: Vec<String>,
+    pub(crate) depends_on: Dependencies,
+    pub(crate) outputs: Outputs,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,8 +267,8 @@ pub struct WorkflowPlanStep {
     prompt: Option<String>,
     human: bool,
     process: Option<WorkflowPlanProcess>,
-    depends_on: Vec<String>,
-    outputs: Vec<String>,
+    depends_on: Dependencies,
+    outputs: Outputs,
 }
 
 impl WorkflowPlanStep {
@@ -303,13 +305,13 @@ impl WorkflowPlanStep {
     /// Возвращает dependencies в source order.
     #[must_use]
     pub fn depends_on(&self) -> &[String] {
-        &self.depends_on
+        self.depends_on.sources()
     }
 
     /// Возвращает outputs в source order.
     #[must_use]
     pub fn outputs(&self) -> &[String] {
-        &self.outputs
+        self.outputs.ids()
     }
 }
 
@@ -612,16 +614,8 @@ impl From<Workflow> for WorkflowPlan {
                         cwd: process.cwd.to_string_lossy().into_owned(),
                         stdout: process.stdout.map(SymbolicId::into_string),
                     }),
-                    depends_on: step
-                        .depends_on
-                        .into_iter()
-                        .map(SymbolicId::into_string)
-                        .collect(),
-                    outputs: step
-                        .outputs
-                        .into_iter()
-                        .map(SymbolicId::into_string)
-                        .collect(),
+                    depends_on: step.depends_on,
+                    outputs: step.outputs,
                 })
                 .collect(),
         }
@@ -632,34 +626,18 @@ fn validate_source_reachability(
     workflow: &str,
     steps: &[crate::catalog::SourceWorkflowStep],
 ) -> Result<(), CommandError> {
-    let mut reachable = HashSet::with_capacity(steps.len());
-    if let Some(first) = steps.first() {
-        reachable.insert(first.id());
-    }
-    loop {
-        let previous_len = reachable.len();
-        for step in steps.iter().skip(1) {
-            if !step.depends_on().is_empty()
-                && step
-                    .depends_on()
-                    .iter()
-                    .all(|dependency| reachable.contains(dependency.as_str()))
-            {
-                reachable.insert(step.id());
-            }
-        }
-        if reachable.len() == previous_len {
-            break;
-        }
-    }
-    if let Some(step) = steps.iter().find(|step| !reachable.contains(step.id())) {
-        return Err(invalid_graph(
-            workflow,
-            step.id(),
-            "Step статически недостижим из initial activation",
-        ));
-    }
-    Ok(())
+    crate::domain::Graph::validate(
+        steps
+            .iter()
+            .map(|step| crate::domain::GraphStep {
+                id: step.id(),
+                depends_on: step.dependencies(),
+                outputs: step.output_expression(),
+            })
+            .collect(),
+    )
+    .map(|_| ())
+    .map_err(|message| invalid_graph(workflow, "graph", &message))
 }
 
 fn invalid_graph(workflow: &str, step: &str, message: &str) -> CommandError {
@@ -757,8 +735,8 @@ fn render_workflow_plan(
                         agent.reasoning,
                         prompt_bytes,
                         step.human,
-                        joined_or_dash(&step.depends_on),
-                        joined_or_dash(&step.outputs)
+                        step.depends_on.text(),
+                        step.outputs.text()
                     )
                     .map_err(workflow_formatting_error)?;
                 } else if let Some(process) = &step.process {
@@ -770,8 +748,8 @@ fn render_workflow_plan(
                         process.args.len(),
                         process.cwd,
                         process.stdout.as_deref().unwrap_or("-"),
-                        joined_or_dash(&step.depends_on),
-                        joined_or_dash(&step.outputs)
+                        step.depends_on.text(),
+                        step.outputs.text()
                     )
                     .map_err(workflow_formatting_error)?;
                 }
@@ -785,14 +763,6 @@ fn render_workflow_plan(
                 source: std::io::Error::other(source),
             })
         }
-    }
-}
-
-fn joined_or_dash(values: &[String]) -> String {
-    if values.is_empty() {
-        "-".to_owned()
-    } else {
-        values.join(",")
     }
 }
 
@@ -867,13 +837,8 @@ fn materialize(
                 "StepId повторяется",
             ));
         }
-        let depends_on = parse_unique_ids(
-            workflow_id,
-            step_id.as_str(),
-            "depends-on",
-            raw_step.depends_on,
-        )?;
-        let outputs = parse_unique_ids(workflow_id, step_id.as_str(), "outputs", raw_step.outputs)?;
+        let depends_on = raw_step.depends_on;
+        let outputs = raw_step.outputs;
         let (agent, prompt, human, process) = if let Some(raw_process) = raw_step.process {
             if raw_step.agent.is_some() {
                 return Err(invalid_step(
@@ -1184,29 +1149,6 @@ fn parse_step_id(
     })
 }
 
-fn parse_unique_ids(
-    workflow_id: &WorkflowId,
-    step_id: &str,
-    field: &str,
-    values: Vec<String>,
-) -> Result<Vec<SymbolicId>, CommandError> {
-    let mut seen = HashSet::with_capacity(values.len());
-    let mut parsed = Vec::with_capacity(values.len());
-    for value in values {
-        let id = SymbolicId::parse(field, &value)
-            .map_err(|context| invalid_step(workflow_id, step_id, &context))?;
-        if !seen.insert(id.clone()) {
-            return Err(invalid_step(
-                workflow_id,
-                step_id,
-                &format!("{field} содержит повтор '{}'", id.as_str()),
-            ));
-        }
-        parsed.push(id);
-    }
-    Ok(parsed)
-}
-
 fn resolve_agent(
     workflow_id: &WorkflowId,
     step_id: &str,
@@ -1334,7 +1276,7 @@ fn validate_process(
     process: &ProcessStep,
 ) -> Result<(), CommandError> {
     if let Some(stdout) = &process.stdout
-        && !step.outputs.contains(stdout)
+        && !step.outputs.iter().any(|id| id == stdout.as_str())
     {
         return Err(invalid_step(
             &workflow.id,
@@ -1409,7 +1351,7 @@ fn validate_process_argument(
         ["output", input_id] => {
             let input_id = SymbolicId::parse("InputId", input_id)
                 .map_err(|context| invalid_step(&workflow.id, step.id.as_str(), &context))?;
-            if !step.outputs.contains(&input_id) {
+            if !step.outputs.iter().any(|id| id == input_id.as_str()) {
                 return Err(invalid_step(
                     &workflow.id,
                     step.id.as_str(),
@@ -1495,7 +1437,11 @@ fn validate_placeholders(
     placeholders: &[Placeholder],
 ) -> Result<(), CommandError> {
     for placeholder in placeholders {
-        if !step.depends_on.contains(&placeholder.step_id) {
+        if !step
+            .depends_on
+            .iter()
+            .any(|id| id == placeholder.step_id.as_str())
+        {
             return Err(invalid_step(
                 &workflow.id,
                 step.id.as_str(),
@@ -1515,7 +1461,11 @@ fn validate_placeholders(
                 ),
             )
         })?;
-        if !source.outputs.contains(&placeholder.input_id) {
+        if !source
+            .outputs
+            .iter()
+            .any(|id| id == placeholder.input_id.as_str())
+        {
             return Err(invalid_step(
                 &workflow.id,
                 step.id.as_str(),
@@ -1526,41 +1476,47 @@ fn validate_placeholders(
                 ),
             ));
         }
+        let graph = crate::domain::Graph::validate(
+            workflow
+                .steps
+                .iter()
+                .map(|candidate| crate::domain::GraphStep {
+                    id: candidate.id.as_str(),
+                    depends_on: &candidate.depends_on,
+                    outputs: &candidate.outputs,
+                })
+                .collect(),
+        )
+        .map_err(|message| invalid_workflow(&workflow.id, &message))?;
+        if !graph.guarantees(
+            &step.depends_on,
+            placeholder.step_id.as_str(),
+            placeholder.input_id.as_str(),
+        ) {
+            return Err(invalid_step(
+                &workflow.id,
+                step.id.as_str(),
+                "placeholder не гарантирован выбранными dependencies",
+            ));
+        }
     }
     Ok(())
 }
 
 fn validate_reachability(workflow: &Workflow) -> Result<(), CommandError> {
-    let mut reachable = HashSet::with_capacity(workflow.steps.len());
-    reachable.insert(workflow.steps[0].id.clone());
-    loop {
-        let previous_len = reachable.len();
-        for step in workflow.steps.iter().skip(1) {
-            if !step.depends_on.is_empty()
-                && step
-                    .depends_on
-                    .iter()
-                    .all(|dependency| reachable.contains(dependency))
-            {
-                reachable.insert(step.id.clone());
-            }
-        }
-        if reachable.len() == previous_len {
-            break;
-        }
-    }
-    if let Some(step) = workflow
-        .steps
-        .iter()
-        .find(|step| !reachable.contains(&step.id))
-    {
-        return Err(invalid_step(
-            &workflow.id,
-            step.id.as_str(),
-            "Step статически недостижим из initial activation",
-        ));
-    }
-    Ok(())
+    crate::domain::Graph::validate(
+        workflow
+            .steps
+            .iter()
+            .map(|step| crate::domain::GraphStep {
+                id: step.id.as_str(),
+                depends_on: &step.depends_on,
+                outputs: &step.outputs,
+            })
+            .collect(),
+    )
+    .map(|_| ())
+    .map_err(|message| invalid_workflow(&workflow.id, &message))
 }
 
 fn invalid_workflow(workflow_id: &WorkflowId, message: &str) -> CommandError {

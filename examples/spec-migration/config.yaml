@@ -1,0 +1,8 @@
+default-workflow: spec-migration
+default-agent: sol
+max-parallel-agents: 1
+agents:
+  sol:
+    type: codex
+    model: gpt-5.6-sol
+    reasoning: high

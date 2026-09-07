@@ -1,0 +1,71 @@
+steps:
+  - id: implement
+    agent: sol
+    prompt: migrate-spec
+    human: false
+    depends-on:
+      - step: decision
+        output: repeat
+    outputs:
+      - one-of: [review, done]
+  - id: review
+    agent: sol
+    prompt: review-migration
+    human: true
+    depends-on:
+      - step: implement
+        output: review
+    outputs:
+      - one-of: [fix, accept]
+  - id: commit
+    process:
+      executable: /bin/sh
+      args:
+        - -c
+        - |
+          set -eu
+          /usr/bin/git add -A
+          if /usr/bin/git diff --cached --quiet; then
+            echo "error: migration batch has no changes to commit" >&2
+            exit 1
+          fi
+          /usr/bin/git commit -F "$1"
+        - commit
+        - "{{path:review:accept}}"
+    human: false
+    depends-on:
+      - step: review
+        output: accept
+    outputs: []
+  - id: decision
+    process:
+      executable: /bin/sh
+      args:
+        - -c
+        - |
+          case "$ORC_INPUT" in
+            *"step-id: implement"*) : > "$2" ;;
+            *) : > "$1" ;;
+          esac
+        - decision
+        - "{{output:repeat}}"
+        - "{{output:done}}"
+    human: false
+    depends-on:
+      - one-of:
+          - step: implement
+            output: done
+          - step: review
+            output: fix
+          - commit
+    outputs:
+      - one-of: [repeat, done]
+  - id: exit
+    process:
+      executable: /usr/bin/true
+      args: []
+    human: false
+    depends-on:
+      - step: decision
+        output: done
+    outputs: []

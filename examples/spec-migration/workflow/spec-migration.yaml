@@ -4,8 +4,11 @@ steps:
     prompt: migrate-spec
     human: false
     depends-on:
-      - step: decision
-        output: repeat
+      - one-of:
+          - step: decision
+            output: fix
+          - step: decision
+            output: repeat
     outputs:
       - one-of: [review, done]
   - id: review
@@ -43,11 +46,17 @@ steps:
       args:
         - -c
         - |
+          set -eu
           case "$ORC_INPUT" in
-            *"step-id: implement"*) : > "$2" ;;
-            *) : > "$1" ;;
+            *"step-id: implement"*) : > "$3" ;;
+            *"step-id: review"*)
+              review_path=$(printf '%s\n' "$ORC_INPUT" | /usr/bin/sed -n 's/^  path: //p')
+              /bin/cp "$review_path" "$1"
+              ;;
+            *) : > "$2" ;;
           esac
         - decision
+        - "{{output:fix}}"
         - "{{output:repeat}}"
         - "{{output:done}}"
     human: false
@@ -59,7 +68,7 @@ steps:
             output: fix
           - commit
     outputs:
-      - one-of: [repeat, done]
+      - one-of: [fix, repeat, done]
   - id: exit
     process:
       executable: /usr/bin/true

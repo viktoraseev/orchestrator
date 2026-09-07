@@ -15,7 +15,10 @@ use super::control::{
 };
 use super::storage::RunGuard;
 use super::{TEMP_SEQUENCE, invalid_run, runtime};
-use crate::agent::{AgentCancellation, AgentInput, AgentRegistry, AgentRunRequest, wait_for_child};
+use crate::agent::{
+    AgentCancellation, AgentInput, AgentRegistry, AgentRunRequest, ProcessSignalTarget,
+    wait_for_child,
+};
 use crate::config::CommandError;
 use crate::domain::{
     DurableAttempt, MaterializedProcess, MaterializedStep, MaterializedWorkflow, RunId,
@@ -187,7 +190,12 @@ fn run_process_attempt(
             });
         }
     };
-    let status = match wait_for_child(&mut child, "Process", execution.cancellation) {
+    let status = match wait_for_child(
+        &mut child,
+        "Process",
+        execution.cancellation,
+        ProcessSignalTarget::Group,
+    ) {
         Ok(status) => status,
         Err(context) => {
             cleanup_process_outputs(&output_paths);

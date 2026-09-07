@@ -4,6 +4,7 @@ Feature: Human Agent lifecycle
   @cli:вывод-команд @cli:коды-завершения @cli:сигналы-и-закрытие-терминала
   Rule: Human attempt запускается только с доступным TTY
     Human Agent process напрямую и эксклюзивно занимает TTY lifecycle-команды; если human attempt становится runnable без TTY, lifecycle завершается runtime failure с кодом 1 до запуска Agent, а headless-режима нет.
+    Human Agent остаётся в foreground process group supervisor, поэтому может читать controlling TTY без SIGTTIN; terminal signals получает вся foreground group, а внутренний fail-fast сигнализирует непосредственно human Agent process.
     Одновременно работает не более одного human attempt; при свободном slot supervisor выбирает human работу раньше non-human и начинает с самого раннего Step в materialized workflow, а остальные human attempts ждут следующих scheduling passes.
     Non-human attempts могут работать параллельно с human attempt без доступа к TTY и без сырого live-потока в терминал.
 
@@ -22,10 +23,10 @@ Feature: Human Agent lifecycle
     @process
     Scenario: Human process напрямую наследует TTY lifecycle-команды
       Given подготовлен single-step human workflow
-      And process human Agent проверяет stdin и stdout TTY
-      When human workflow запускается через системный pseudo-terminal
+      And process human Agent читает решение из stdin и проверяет stdout TTY
+      When human workflow запускается через системный pseudo-terminal с решением "accept"
       Then lifecycle завершается с кодом 0
-      And process human Agent подтвердил прямой TTY
+      And process human Agent получил решение "accept" через прямой TTY
 
     Scenario: Готовые human Steps выбираются по workflow order
       Given подготовлен workflow с двумя готовыми human Steps

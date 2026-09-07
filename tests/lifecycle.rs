@@ -1548,11 +1548,11 @@ fn child_orchestrator_used_inherited_control_context(world: &mut LifecycleWorld)
     );
 }
 
-#[given("process human Agent проверяет stdin и stdout TTY")]
-fn process_human_agent_checks_terminal(world: &mut LifecycleWorld) {
+#[given("process human Agent читает решение из stdin и проверяет stdout TTY")]
+fn process_human_agent_reads_terminal(world: &mut LifecycleWorld) {
     prepare_process_agent(
         world,
-        "#!/bin/sh\ntest -t 0 && test -t 1 || exit 9\n: > \"$ORC_TEST_TTY_CONFIRMED\"\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n",
+        "#!/bin/sh\ntest -t 0 && test -t 1 || exit 9\nIFS= read -r decision || exit 8\nprintf '%s' \"$decision\" > \"$ORC_TEST_TTY_CONFIRMED\"\n\"$ORC_TEST_ORCHESTRATOR\" attempt complete\n",
     );
 }
 
@@ -2384,15 +2384,25 @@ fn resume_through_process(world: &mut LifecycleWorld) {
     });
 }
 
-#[when("human workflow запускается через системный pseudo-terminal")]
+#[when(expr = "human workflow запускается через системный pseudo-terminal с решением {string}")]
+#[allow(clippy::needless_pass_by_value)]
+fn start_human_with_terminal_input(world: &mut LifecycleWorld, decision: String) {
+    start_human_through_terminal_with_input(world, Some(&decision));
+}
+
 #[when("workflow запускается через pseudo-terminal")]
 fn start_human_through_terminal(world: &mut LifecycleWorld) {
+    start_human_through_terminal_with_input(world, None);
+}
+
+fn start_human_through_terminal_with_input(world: &mut LifecycleWorld, input: Option<&str>) {
     let root = world.root.as_ref().expect("scenario must define root");
     let agent = world
         .process_agent
         .as_ref()
         .expect("scenario must define process Agent");
-    let output = Command::new("/usr/bin/script")
+    let mut command = Command::new("/usr/bin/script");
+    command
         .args([
             "-q",
             "-e",
@@ -2405,8 +2415,26 @@ fn start_human_through_terminal(world: &mut LifecycleWorld) {
         .env("ORC_AGENT_COMMAND", agent)
         .env("ORC_TEST_ORCHESTRATOR", env!("CARGO_BIN_EXE_orchestrator"))
         .env("ORC_TEST_TTY_CONFIRMED", root.path().join("tty-confirmed"))
-        .output()
-        .expect("pseudo-terminal command must run");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let mut child = command.spawn().expect("pseudo-terminal command must run");
+    let mut terminal_input = None;
+    if let Some(input) = input {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("script stdin must be piped");
+        writeln!(stdin, "{input}").expect("decision must be written");
+        stdin.flush().expect("decision must be flushed");
+        terminal_input = Some(stdin);
+    }
+    let output = child
+        .wait_with_output()
+        .expect("pseudo-terminal command must finish");
+    drop(terminal_input);
     let lines: Vec<String> = String::from_utf8(output.stdout)
         .expect("stdout must be UTF-8")
         .lines()
@@ -3572,10 +3600,15 @@ fn agent_received_human_mode(world: &mut LifecycleWorld) {
     assert_eq!(world.calls[0].step_id, "human-step");
 }
 
-#[then("process human Agent подтвердил прямой TTY")]
-fn process_human_confirmed_terminal(world: &mut LifecycleWorld) {
+#[then(expr = "process human Agent получил решение {string} через прямой TTY")]
+#[allow(clippy::needless_pass_by_value)]
+fn process_human_received_terminal_input(world: &mut LifecycleWorld, expected: String) {
     let root = world.root.as_ref().expect("scenario must define root");
-    assert!(root.path().join("tty-confirmed").is_file());
+    assert_eq!(
+        fs::read_to_string(root.path().join("tty-confirmed"))
+            .expect("TTY decision must be readable"),
+        expected
+    );
 }
 
 #[then("lifecycle сообщает interrupted и команду resume")]

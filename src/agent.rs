@@ -318,7 +318,6 @@ impl AgentRegistry for ProcessAgentRegistry {
             command.env("ORC_RESUME_SESSION", session_id);
         }
         agent_type.configure(&mut command, request);
-        command.process_group(0);
         if request.human {
             command
                 .stdin(Stdio::inherit())
@@ -326,6 +325,7 @@ impl AgentRegistry for ProcessAgentRegistry {
                 .stderr(Stdio::inherit());
         } else {
             command
+                .process_group(0)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
@@ -347,7 +347,7 @@ impl AgentRegistry for ProcessAgentRegistry {
         });
         let observer = self.observer.as_deref();
         let status = if request.human {
-            wait_for_process(&mut child, request)?
+            wait_for_process(&mut child, request, ProcessSignalTarget::Process)?
         } else {
             let stdout = child
                 .stdout
@@ -356,7 +356,8 @@ impl AgentRegistry for ProcessAgentRegistry {
             thread::scope(|scope| {
                 let reader = scope
                     .spawn(|| consume_protocol(agent_type, stdout, request, control, observer));
-                let process_result = wait_for_process(&mut child, request);
+                let process_result =
+                    wait_for_process(&mut child, request, ProcessSignalTarget::Group);
                 let protocol_result = reader.join().map_err(|_| {
                     format!("Agent type '{}' protocol reader panic", request.type_id)
                 })?;
@@ -482,18 +483,27 @@ fn normalize_message(message: &str) -> String {
 fn wait_for_process(
     child: &mut Child,
     request: &AgentRunRequest<'_>,
+    signal_target: ProcessSignalTarget,
 ) -> Result<ExitStatus, String> {
     wait_for_child(
         child,
         &format!("Agent type '{}'", request.type_id),
         request.cancellation,
+        signal_target,
     )
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProcessSignalTarget {
+    Group,
+    Process,
 }
 
 pub(crate) fn wait_for_child(
     child: &mut Child,
     label: &str,
     cancellation: &AgentCancellation,
+    signal_target: ProcessSignalTarget,
 ) -> Result<ExitStatus, String> {
     let mut termination_deadline = None;
     loop {
@@ -506,18 +516,41 @@ pub(crate) fn wait_for_child(
         if let Some(signal) = cancellation.signal()
             && termination_deadline.is_none()
         {
-            signal_process_group(child.id(), signal.name())?;
+            signal_process(child.id(), signal.name(), signal_target)?;
             termination_deadline = Some(Instant::now() + Duration::from_secs(10));
         }
         if cancellation.should_escalate()
             || termination_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
-            signal_process_group(child.id(), "KILL")?;
+            signal_process(child.id(), "KILL", signal_target)?;
             return child
                 .wait()
                 .map_err(|error| format!("не удалось дождаться {label}: {error}"));
         }
         thread::park_timeout(Duration::from_millis(10));
+    }
+}
+
+fn signal_process(
+    process_id: u32,
+    signal: &str,
+    target: ProcessSignalTarget,
+) -> Result<(), String> {
+    match target {
+        ProcessSignalTarget::Group => signal_process_group(process_id, signal),
+        ProcessSignalTarget::Process => signal_process_id(process_id, signal),
+    }
+}
+
+fn signal_process_id(process_id: u32, signal: &str) -> Result<(), String> {
+    let status = Command::new("/bin/kill")
+        .args([format!("-{signal}"), process_id.to_string()])
+        .status()
+        .map_err(|error| format!("не удалось послать SIG{signal} process: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("SIG{signal} process завершился с {status}"))
     }
 }
 

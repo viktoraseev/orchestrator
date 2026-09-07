@@ -119,10 +119,10 @@ Config commands не получают run locks и не изменяют сущ�
 
 - Первый `SIGINT`, `SIGTERM` или `SIGHUP`, полученный во время обычного выполнения либо user shutdown, переводит supervisor в signal shutdown:
     1. Новые attempts больше не создаются.
-    2. Тот же сигнал передаётся всем supervised Agent и Process process groups.
+    2. Тот же сигнал передаётся всем supervised non-human Agent и Process process groups; human Agent состоит в foreground process group supervisor и получает terminal signal напрямую, а runtime fail-fast сигнализирует непосредственно его process.
     3. Control endpoint остаётся доступен, пока агенты завершаются. Уже принятые и поступившие от ещё supervised процессов tool calls, включая `session activate` и `attempt complete`, полностью сериализуются по обычным правилам. Parent завершает storage operation уже принятого запроса, даже если его дочерний `orchestrator` завершился до получения ответа.
     4. Supervisor ждёт завершения executors и Agent control calls не более 10 секунд.
-    5. После timeout или второго termination signal оставшиеся process groups получают `SIGKILL` и reaped.
+    5. После timeout или второго termination signal оставшиеся non-human process groups и human Agent process получают `SIGKILL` и reaped.
     6. Supervisor завершает уже принятую атомарную storage operation и финализирует кандидаты агентов, чьи процессы вернули управление, закрывает control endpoint и освобождает Run lock.
 
 - Команда возвращает `128 + signal`: `130` для Ctrl-C/SIGINT, `143` для SIGTERM и `129` для SIGHUP. Эскалация по timeout или повторному сигналу не меняет код первого сигнала.

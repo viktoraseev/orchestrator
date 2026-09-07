@@ -22,3 +22,11 @@ spec-migration workflow после review:fix запускал implement тол�
 **2026-09-07T22:10:03Z**
 
 Исправлен spec-migration wiring: decision публикует fix/repeat/done, implement принимает decision:fix либо decision:repeat; fix копирует review artifact байт-в-байт. validate, plan, router test, ./scripts/test.sh и ./scripts/build.sh прошли.
+
+**2026-09-07T23:53:23Z**
+
+Повторное тестирование выявило неоднозначность prompt: Agent искал literal decision:fix, хотя ORC_INPUT сериализует step-id и input-id отдельными YAML-полями. Durable attempts 5/6 подтвердили корректный routing и наличие decision.fix artifact.
+
+**2026-09-07T23:59:13Z**
+
+Prompt теперь классифицирует ORC_INPUT по паре YAML-полей step-id/input-id: fix исправляет текущую пачку, repeat и bootstrap выбирают новую, любой иной mapping fail-fast. validate, ./scripts/test.sh и ./scripts/build.sh прошли.

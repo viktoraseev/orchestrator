@@ -100,6 +100,18 @@ fn workflow_for_agent_type(world: &mut LifecycleWorld, agent_type: String) {
     world.agent_type = Some(agent_type);
 }
 
+#[given(expr = "подготовлен workflow с предварительным Process и Agent type {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn workflow_with_process_before_agent(world: &mut LifecycleWorld, agent_type: String) {
+    workflow_for_agent_type(world, agent_type);
+    let root = world.root.as_ref().expect("scenario must define root");
+    fs::write(
+        root.path().join("workflow/delivery.yaml"),
+        "steps:\n  - id: prepare\n    process:\n      executable: /usr/bin/true\n      args: []\n    human: false\n    depends-on: []\n    outputs: []\n  - id: observe\n    agent: main\n    prompt: null\n    human: false\n    depends-on: [prepare]\n    outputs: []\n",
+    )
+    .expect("workflow must be written");
+}
+
 #[given(expr = "config содержит Agent type {word} с model {word} и reasoning {word}")]
 #[allow(clippy::needless_pass_by_value)]
 fn config_for_agent_type(
@@ -513,14 +525,14 @@ fn process_agent_publishes_messages(world: &mut LifecycleWorld, agent_type: Stri
     );
 }
 
-#[then("TTY board показывает 2 и последнее сообщение одной строкой")]
+#[then("TTY board показывает attempt 1, 2 сообщения и последнее сообщение одной строкой")]
 fn board_shows_normalized_message(world: &mut LifecycleWorld) {
     assert!(
         world
             .observed()
             .lines
             .iter()
-            .any(|line| line.contains("first · 2 · second message"))
+            .any(|line| line.contains("observe · attempt 1 · messages 2 · second message"))
     );
 }
 

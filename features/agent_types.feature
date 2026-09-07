@@ -181,13 +181,14 @@ Feature: Встроенные Agent types
   @process @cli:вывод-команд
   Rule: Agent session view остаётся volatile
     Codex `item.completed` с `item.type = "agent_message"` и Claude `assistant` с text content blocks обновляют только volatile view; неизвестные валидные events игнорируются.
+    Строка TTY board отдельно подписывает durable attempt number и volatile число сообщений текущего supervisor.
 
     Scenario Outline: TTY board нормализует сообщения встроенного Agent type
-      Given подготовлен single-step workflow для Agent type <type>
+      Given подготовлен workflow с предварительным Process и Agent type <type>
       And process Agent игнорирует неизвестный event, публикует два сообщения для <type> и завершает attempt
       When workflow запускается через pseudo-terminal
       Then lifecycle завершается с кодом 0
-      And TTY board показывает 2 и последнее сообщение одной строкой
+      And TTY board показывает attempt 1, 2 сообщения и последнее сообщение одной строкой
       And session view отсутствует в durable run
 
       Examples:

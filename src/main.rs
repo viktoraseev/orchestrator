@@ -268,11 +268,11 @@ impl TerminalAgentBoard {
         }
         let mut stdout = io::stdout().lock();
         let _ = writeln!(stdout, "\r\x1b[2KAgent sessions:");
-        for row in state.attempts.values() {
+        for (attempt, row) in &state.attempts {
             let _ = writeln!(
                 stdout,
-                "\x1b[2K  {} · {} · {}",
-                row.step_id, row.messages, row.last_message
+                "\x1b[2K  {} · attempt {} · messages {} · {}",
+                row.step_id, attempt, row.messages, row.last_message
             );
         }
         let _ = stdout.flush();

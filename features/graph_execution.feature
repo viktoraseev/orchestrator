@@ -91,6 +91,13 @@ Feature: Выполнение workflow graph
       Then lifecycle завершается с кодом 1
       And создан ровно один join attempt с input 1, 2
 
+    Scenario: Выбранная внешняя часть входа repeat region без feedback блокирует run
+      Given подготовлен durable cycle с выбранной внешней частью входа и отсутствующим feedback
+      When run продолжается через lifecycle API
+      Then lifecycle завершается с кодом 1
+      And диагностика сообщает blocked и отсутствующий feedback Step right
+      And Agent не запускался и durable run не изменился
+
     @process
     Scenario: CLI возвращает стабильную диагностику недопустимого цикла
       Given подготовлен durable run с недопустимыми взаимными циклами

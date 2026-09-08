@@ -1078,6 +1078,21 @@ fn partially_satisfied_durable_run(world: &mut LifecycleWorld) {
     );
 }
 
+#[given("подготовлен durable cycle с выбранной внешней частью входа и отсутствующим feedback")]
+fn cycle_with_selected_external_entry_and_missing_feedback(world: &mut LifecycleWorld) {
+    prepare_durable_run(
+        world,
+        "workflow-id: blocked\nmax-parallel-agents: 5\nsteps:\n- id: source\n  agent: &agent\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: []\n  outputs: [{one-of: [start, wait]}]\n- id: left\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [{one-of: [{step: source, output: start}, {all: [{step: source, output: wait}, right]}]}]\n  outputs: []\n- id: right\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [{one-of: [{step: source, output: start}, {all: [{step: source, output: wait}, left]}]}]\n  outputs: []\n",
+        &[(
+            "0.source.attempt.yaml",
+            "input: []\nevents:\n- type: completed\n",
+        )],
+    );
+    fs::write(run_directory(world).join("0.source.wait.artifact"), b"wait")
+        .expect("selected external artifact must be written");
+    world.durable_snapshot = durable_snapshot(world);
+}
+
 #[given("подготовлен durable run с полностью удовлетворённой dependency group")]
 fn fully_satisfied_durable_run(world: &mut LifecycleWorld) {
     prepare_satisfied_dependency_run(
@@ -3397,6 +3412,20 @@ fn blocked_diagnostic_lists_missing_sources(world: &mut LifecycleWorld) {
         .as_deref()
         .expect("blocked resume must return diagnostics");
     assert!(error.contains("статически недостижим"));
+}
+
+#[then("диагностика сообщает blocked и отсутствующий feedback Step right")]
+fn blocked_diagnostic_reports_missing_feedback(world: &mut LifecycleWorld) {
+    let error = world
+        .observed()
+        .error
+        .as_deref()
+        .expect("blocked resume must return diagnostics");
+    assert!(error.contains("blocked"), "diagnostic={error}");
+    assert!(
+        error.contains("отсутствуют source Steps right"),
+        "diagnostic={error}"
+    );
 }
 
 #[then("Agent не запускался и durable run не изменился")]

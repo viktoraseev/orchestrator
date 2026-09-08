@@ -7,9 +7,17 @@ mod inspection;
 mod scheduler;
 mod storage;
 
+#[cfg(debug_assertions)]
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::fs;
+#[cfg(debug_assertions)]
+use std::marker::PhantomData;
+#[cfg(debug_assertions)]
+use std::path::Path;
+#[cfg(debug_assertions)]
+use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
@@ -47,6 +55,58 @@ use storage::publish_bytes_with_hook;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const INSPECTION_SNAPSHOT_ATTEMPTS: usize = 4;
 const INSPECTION_WATCH_INTERVAL: Duration = Duration::from_millis(100);
+
+#[cfg(debug_assertions)]
+type SnapshotFingerprintHook = Box<dyn FnMut(&Path)>;
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static SNAPSHOT_FINGERPRINT_HOOK: RefCell<Option<SnapshotFingerprintHook>> = const { RefCell::new(None) };
+}
+
+/// RAII-регистрация debug-only наблюдателя первого fingerprint каждой попытки чтения inspection snapshot.
+#[doc(hidden)]
+#[cfg(debug_assertions)]
+pub struct SnapshotFingerprintHookGuard {
+    _not_send: PhantomData<Rc<()>>,
+}
+
+/// Устанавливает на текущем thread debug-only наблюдатель первого fingerprint каждой попытки чтения inspection snapshot.
+///
+/// Наблюдатель предназначен для детерминированного управления durable fixture в acceptance-сценариях Rule «Run inspection читает согласованный snapshot» из `features/run_inspection.feature`; публичные command entrypoints при этом не заменяются.
+///
+/// # Panics
+///
+/// Паникует при вложенной регистрации наблюдателя на том же thread.
+#[doc(hidden)]
+#[cfg(debug_assertions)]
+pub fn install_snapshot_fingerprint_hook(
+    hook: impl FnMut(&Path) + 'static,
+) -> SnapshotFingerprintHookGuard {
+    SNAPSHOT_FINGERPRINT_HOOK.with_borrow_mut(|current| {
+        assert!(current.is_none());
+        *current = Some(Box::new(hook));
+    });
+    SnapshotFingerprintHookGuard {
+        _not_send: PhantomData,
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for SnapshotFingerprintHookGuard {
+    fn drop(&mut self) {
+        SNAPSHOT_FINGERPRINT_HOOK.with_borrow_mut(Option::take);
+    }
+}
+
+#[cfg(debug_assertions)]
+fn notify_snapshot_fingerprint(directory: &Path) {
+    SNAPSHOT_FINGERPRINT_HOOK.with_borrow_mut(|current| {
+        if let Some(hook) = current {
+            hook(directory);
+        }
+    });
+}
 
 /// Команда публичного lifecycle API после разбора CLI.
 #[derive(Clone, Debug, Eq, PartialEq)]

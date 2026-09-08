@@ -27,6 +27,8 @@ pub use run::{
     execute_run_watch, inspect_run, inspect_runs, open_run_artifact, send_attempt_completion,
     send_session_activation,
 };
+#[cfg(debug_assertions)]
+pub use run::{SnapshotFingerprintHookGuard, install_snapshot_fingerprint_hook};
 pub use workflow::{
     ValidateCommand, WorkflowGraph, WorkflowGraphEdge, WorkflowPlan, WorkflowPlanAgent,
     WorkflowPlanProcess, WorkflowPlanStep, WorkflowValidation, WorkflowValidationReport,

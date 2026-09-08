@@ -96,13 +96,6 @@ Config commands не получают run locks и не изменяют сущ�
 
 - Временные файлы атомарной записи, artifacts без соответствующего attempt и файловые остатки attempt без completion не делают run повреждённым и игнорируются по Rule «Файловые остатки незавершённого attempt не входят в durable-модель» в `features/recovery.feature`.
 
-## Read-only `run` inspection
-
-- Каждая команда читает fingerprint durable entries до и после полной validation и повторяет изменившийся snapshot максимум четыре раза; стабильное противоречие завершается с `3`, а исчерпание retry при непрерывных изменениях — runtime code `1`, без partial stdout нового snapshot.
-- `run watch` немедленно печатает initial show snapshot, затем проверяет состояние каждые 100 ms и печатает только изменившиеся validated snapshots; text snapshots следуют подряд как show documents, JSON использует по одному compact object на строку, terminal `blocked|completed` завершается с `0`, а signal — с общим кодом `129|130|143`.
-- `run verify` с RunId проверяет только выбранный run; text содержит `run <id>: valid` либо `run <id>: invalid: <diagnostic>`, I/O даёт `1`, неизвестный явно выбранный run — `4`.
-- Неизвестный явно выбранный RunId, attempt или InputId и artifact незавершённого attempt завершаются с `4`; синтаксически невалидный ID или attempt number завершается с `2`; противоречивая durable-модель завершается с `3`; до успешной полной проверки `run list`, `run show`, `run artifacts` и `run artifact` ничего не пишут в stdout.
-
 ## `validate`
 
 - Global I/O error во время `validate --all` прерывает команду с `1` без partial stdout.

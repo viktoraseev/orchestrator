@@ -118,7 +118,6 @@ Feature: Условные ветви и последовательные пов�
       And materialized plan JSON сохраняет nested one-of/all outputs report, fix, patch, done и qualified dependencies source:fix и source:report в mappings step/output
       And run ещё не создан
 
-  @cli:read-only-run-inspection
   Rule: Inspection перечисляет только artifacts выбранной output-ветви
     Artifact из невыбранной ветви завершённого attempt отсутствует и возвращает код 4; остальные опубликованные artifacts остаются доступными после resume.
 

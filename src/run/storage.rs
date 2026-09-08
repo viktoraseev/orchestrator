@@ -12,6 +12,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::executor::prepare_agent_input;
+#[cfg(debug_assertions)]
+use super::notify_snapshot_fingerprint;
 use super::{INSPECTION_SNAPSHOT_ATTEMPTS, TEMP_SEQUENCE, invalid_run, runtime};
 use crate::agent::{AgentRegistry, BuiltinAgentRegistry};
 use crate::config::CommandError;
@@ -629,6 +631,8 @@ pub(super) fn load_run_snapshot_with_hook(
                 continue;
             }
         };
+        #[cfg(debug_assertions)]
+        notify_snapshot_fingerprint(directory);
         after_fingerprint();
         let result = load_run_snapshot_once(directory, run_id, context);
         let after = match durable_fingerprint(directory, context) {
@@ -643,8 +647,16 @@ pub(super) fn load_run_snapshot_with_hook(
         }
     }
     let detail = last_snapshot_error.map_or_else(
-        || "durable snapshot непрерывно изменяется".to_owned(),
-        |error| format!("durable snapshot непрерывно изменяется: {error}"),
+        || {
+            format!(
+                "durable snapshot непрерывно изменяется после {INSPECTION_SNAPSHOT_ATTEMPTS} попыток"
+            )
+        },
+        |error| {
+            format!(
+                "durable snapshot непрерывно изменяется после {INSPECTION_SNAPSHOT_ATTEMPTS} попыток: {error}"
+            )
+        },
     );
     Err(CommandError::Runtime {
         context: format!("{context}: run {run_id}: {detail}"),

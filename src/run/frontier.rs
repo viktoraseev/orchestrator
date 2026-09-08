@@ -270,7 +270,11 @@ impl Evaluation<'_> {
                 .as_ref()
                 .is_some_and(|region| target == region.entry && region.members.contains(&source))
         {
-            return Inputs::Closed;
+            // 2026-09-08 12:51 До первого входа feedback ещё отсутствует, но выбранная внешняя часть той же обязательной группы должна сделать run blocked, а не completed.
+            return Inputs::Waiting {
+                present: false,
+                missing: vec![leaf.step().to_owned()],
+            };
         }
         match self.step(source) {
             Resolution::Completed(position) => {

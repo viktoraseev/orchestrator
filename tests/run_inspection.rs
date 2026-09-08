@@ -4,25 +4,33 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cucumber::{World, given, then, when};
 use fs2::FileExt;
 use orchestrator::{
-    ProcessEnvironment, RunId, RunInspection, execute_run_list, execute_run_show, inspect_run,
+    InspectionFormat, ProcessEnvironment, RunId, RunInspection, execute_run_artifacts,
+    execute_run_list, execute_run_list_formatted, execute_run_show, execute_run_show_formatted,
+    execute_run_verify, inspect_run, install_snapshot_fingerprint_hook, open_run_artifact,
 };
 use tempfile::TempDir;
 
 #[derive(Debug, Default, World)]
 struct InspectionWorld {
+    snapshot_mutator: Option<SnapshotMutator>,
+    snapshot_changes: Option<usize>,
     root: Option<TempDir>,
     observed: Option<Observed>,
     durable_snapshot: Vec<(PathBuf, Vec<u8>)>,
     lock: Option<File>,
     typed_snapshot: Option<RunInspection>,
     watch_quiet_before_completion: Option<bool>,
+    watch_initial_elapsed: Option<Duration>,
+    watch_four_polls_elapsed: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -33,6 +41,21 @@ struct Observed {
 }
 
 struct ChildGuard(Option<Child>);
+
+#[derive(Debug)]
+struct SnapshotMutator {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for SnapshotMutator {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("snapshot mutator must stop");
+        }
+    }
+}
 
 impl ChildGuard {
     fn new(child: Child) -> Self {
@@ -163,6 +186,78 @@ fn completed_durable_run(world: &mut InspectionWorld, run_id: u64) {
     write_completed_run(world.root(), run_id);
 }
 
+#[given(
+    "подготовлен durable cycle run 20 с выбранной внешней частью входа и отсутствующим feedback"
+)]
+fn terminal_blocked_durable_run(world: &mut InspectionWorld) {
+    empty_inspection_root(world);
+    write_terminal_blocked_run(world.root(), 20);
+}
+
+#[given(expr = "подготовлен completed run 30 с изменениями после первых {int} fingerprint")]
+fn completed_run_with_controlled_snapshot_changes(
+    world: &mut InspectionWorld,
+    snapshot_changes: u64,
+) {
+    empty_inspection_root(world);
+    let directory = run_directory(world.root(), 30);
+    write_run_files(
+        &directory,
+        &single_step_spec("retry-0", "[changing]"),
+        &[(
+            "0.first.attempt.yaml",
+            "input: []\nevents:\n- type: completed\n",
+        )],
+    );
+    fs::write(directory.join("0.first.changing.artifact"), b"published")
+        .expect("artifact must be written");
+    world.snapshot_changes =
+        Some(usize::try_from(snapshot_changes).expect("snapshot change count must fit usize"));
+}
+
+#[given("подготовлен active run с outputs для меняющегося artifact")]
+fn active_run_with_changing_artifact_outputs(world: &mut InspectionWorld) {
+    empty_inspection_root(world);
+    let directory = run_directory(world.root(), 10);
+    write_run_files(
+        &directory,
+        &single_step_spec("changing", "[changing, stable]"),
+        &[("0.first.attempt.yaml", "input: []\nevents: []\n")],
+    );
+}
+
+#[given("подготовлены valid artifact run и противоречивый run")]
+fn valid_artifact_and_invalid_run(world: &mut InspectionWorld) {
+    versioned_binary_artifacts(world);
+    let directory = run_directory(world.root(), 20);
+    fs::create_dir_all(&directory).expect("invalid run directory must be created");
+    fs::write(directory.join("active.lock"), []).expect("lock file must be written");
+    fs::write(directory.join("spec.yaml"), b"steps: [").expect("invalid spec must be written");
+}
+
+#[given("подготовлен completed run с non-regular artifact")]
+fn completed_run_with_non_regular_artifact(world: &mut InspectionWorld) {
+    empty_inspection_root(world);
+    let directory = run_directory(world.root(), 30);
+    write_run_files(
+        &directory,
+        &single_step_spec("completed", "[result]"),
+        &[(
+            "0.first.attempt.yaml",
+            "input: []\nevents:\n- type: completed\n",
+        )],
+    );
+    fs::create_dir(directory.join("0.first.result.artifact"))
+        .expect("non-regular artifact must be created");
+}
+
+#[given("inspection run catalog недоступен как directory")]
+fn run_catalog_is_not_a_directory(world: &mut InspectionWorld) {
+    empty_inspection_root(world);
+    fs::write(world.root().join("run"), b"not a directory")
+        .expect("run catalog fixture must be written");
+}
+
 #[given("подготовлены valid и два противоречивых durable runs")]
 fn valid_and_two_invalid_runs(world: &mut InspectionWorld) {
     empty_inspection_root(world);
@@ -268,32 +363,124 @@ fn artifacts_through_cli(world: &mut InspectionWorld, run_id: String) {
 #[when(expr = "строится typed inspection snapshot run {int} через публичный API")]
 fn typed_snapshot_through_api(world: &mut InspectionWorld, run_id: u64) {
     world.capture_snapshot();
-    match inspect_run(
+    let result = inspect_run(
         RunId::parse(&run_id.to_string()).expect("fixture RunId must be valid"),
         &environment(world.root()),
-    ) {
-        Ok(snapshot) => {
-            world.typed_snapshot = Some(snapshot);
-            world.observed = Some(Observed {
-                exit_code: 0,
-                stdout: Vec::new(),
-                stderr: String::new(),
-            });
+    );
+    observe_typed_snapshot(world, result);
+}
+
+#[when(expr = "выполняется {string} через публичный command entrypoint")]
+#[allow(clippy::needless_pass_by_value)]
+fn inspection_command_through_public_entrypoint(world: &mut InspectionWorld, command: String) {
+    let run_id = RunId::parse("30").expect("fixture RunId must be valid");
+    let environment = environment(world.root());
+    let directory = run_directory(world.root(), 30);
+    let spec_path = directory.join("spec.yaml");
+    let snapshot_changes = world
+        .snapshot_changes
+        .expect("controlled snapshot fixture must define its changes");
+    let mut fingerprint = 0_usize;
+    let _hook = install_snapshot_fingerprint_hook(move |observed_directory| {
+        if observed_directory != directory {
+            return;
         }
-        Err(error) => {
-            world.observed = Some(Observed {
-                exit_code: error.exit_code(),
-                stdout: Vec::new(),
-                stderr: error.to_string(),
-            });
+        fingerprint = fingerprint
+            .checked_add(1)
+            .expect("fingerprint number must fit usize");
+        if fingerprint <= snapshot_changes {
+            fs::write(
+                &spec_path,
+                single_step_spec(&format!("retry-{fingerprint}"), "[changing]"),
+            )
+            .expect("controlled snapshot change must be written");
         }
-    }
+    });
+    let result = match command.as_str() {
+        "run list" => execute_run_list_formatted(&environment, InspectionFormat::Text, &[], None),
+        "run show" => execute_run_show_formatted(run_id, &environment, InspectionFormat::Text),
+        "run artifacts" => execute_run_artifacts(run_id, &environment, InspectionFormat::Text),
+        "run artifact" => open_run_artifact(run_id, 0, "changing", &environment)
+            .map(|_| "artifact opened".to_owned()),
+        "run verify" => {
+            execute_run_verify(None, &environment, InspectionFormat::Text).map(|(output, _)| output)
+        }
+        other => panic!("unknown inspection command: {other}"),
+    };
+    world.observed = Some(observe_api(result));
 }
 
 #[when(expr = "запускается orchestrator run watch {word} в JSON")]
 #[allow(clippy::needless_pass_by_value)]
 fn watch_json_through_cli(world: &mut InspectionWorld, run_id: String) {
     run_cli(world, ["run", "watch", &run_id, "--format", "json"]);
+}
+
+#[when(expr = "запускается orchestrator run watch {word} в text")]
+#[allow(clippy::needless_pass_by_value)]
+fn watch_text_through_cli(world: &mut InspectionWorld, run_id: String) {
+    run_cli(world, ["run", "watch", &run_id, "--format", "text"]);
+}
+
+#[when(expr = "запускается text watch {int} с ожиданием немедленного initial snapshot")]
+fn text_watch_publishes_initial_immediately(world: &mut InspectionWorld, run_id: u64) {
+    world.capture_snapshot();
+    let mut fastest = Duration::MAX;
+    for _ in 0..5 {
+        let started = Instant::now();
+        let mut process = spawn_watch(world.root(), run_id, "text");
+        let (lines, reader) = read_child_lines(&mut process);
+        let initial = recv_watch_line(&lines);
+        let elapsed = started.elapsed();
+
+        let output = process.wait_with_output();
+        reader.join().expect("watch stdout reader must finish");
+        let mut snapshots = vec![initial];
+        snapshots.extend(lines.try_iter());
+        if elapsed < fastest {
+            fastest = elapsed;
+            world.observed = Some(observe_watch_output(&output, &snapshots));
+        }
+    }
+    world.watch_initial_elapsed = Some(fastest);
+}
+
+#[when("text watch синхронизирован active snapshot и наблюдает три изменения и completion")]
+fn text_watch_observes_four_poll_intervals(world: &mut InspectionWorld) {
+    world.capture_snapshot();
+    let directory = run_directory(world.root(), 10);
+    let mut process = spawn_watch(world.root(), 10, "text");
+    let (lines, reader) = read_child_lines(&mut process);
+    let mut snapshots = recv_watch_lines(&lines, 4);
+
+    fs::write(
+        directory.join("0.first.attempt.yaml"),
+        b"input: []\nevents:\n- type: session-activated\n  session-id: poll-anchor\n",
+    )
+    .expect("poll anchor must be published");
+    snapshots.extend(recv_watch_lines(&lines, 4));
+
+    let started = Instant::now();
+    for session in ["poll-one", "poll-two", "poll-three"] {
+        fs::write(
+            directory.join("0.first.attempt.yaml"),
+            format!("input: []\nevents:\n- type: session-activated\n  session-id: {session}\n"),
+        )
+        .expect("polled session change must be published");
+        snapshots.extend(recv_watch_lines(&lines, 4));
+    }
+    fs::write(
+        directory.join("0.first.attempt.yaml"),
+        b"input: []\nevents:\n- type: session-activated\n  session-id: poll-three\n- type: completed\n",
+    )
+    .expect("completion must be published");
+    snapshots.extend(recv_watch_lines(&lines, 4));
+    world.watch_four_polls_elapsed = Some(started.elapsed());
+
+    let output = process.wait_with_output();
+    reader.join().expect("watch stdout reader must finish");
+    snapshots.extend(lines.try_iter());
+    world.observed = Some(observe_watch_output(&output, &snapshots));
 }
 
 #[when("watch наблюдает изменения lock и временного entry до durable completion")]
@@ -329,16 +516,63 @@ fn watch_volatile_entries_then_completion(world: &mut InspectionWorld) {
     world.observed = Some(observe_watch_output(&output, &snapshots));
 }
 
-#[when("active watch получает SIGTERM после initial snapshot")]
-fn active_watch_receives_sigterm(world: &mut InspectionWorld) {
+#[when("watch наблюдает completion с непрерывно меняющимся durable artifact")]
+fn watch_observes_continuously_changing_completion(world: &mut InspectionWorld) {
+    world.capture_snapshot();
+    let directory = run_directory(world.root(), 10);
+    let mut process = spawn_json_watch(world.root(), 10);
+    let (lines, reader) = read_child_lines(&mut process);
+    let mut snapshots = vec![recv_watch_line(&lines)];
+
+    fs::write(
+        directory.join("0.first.changing.artifact"),
+        0_u64.to_le_bytes(),
+    )
+    .expect("changing artifact must be written");
+    fs::write(
+        directory.join("0.first.stable.artifact"),
+        vec![b'x'; 8 * 1024 * 1024],
+    )
+    .expect("stable artifact must be written");
+    world.snapshot_mutator = Some(start_snapshot_mutator(
+        directory.join("0.first.changing.artifact"),
+    ));
+    fs::write(
+        directory.join("0.first.attempt.yaml"),
+        b"input: []\nevents:\n- type: completed\n",
+    )
+    .expect("completion must be published");
+
+    loop {
+        match lines.recv_timeout(Duration::from_secs(2)) {
+            Ok(snapshot) => snapshots.push(snapshot),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => panic!("watch must fail before deadline"),
+        }
+    }
+    world.snapshot_mutator.take();
+    let output = process.wait_with_output();
+    reader.join().expect("watch stdout reader must finish");
+    world.observed = Some(observe_watch_output(&output, &snapshots));
+}
+
+#[when(expr = "active watch получает {word} после initial snapshot")]
+#[allow(clippy::needless_pass_by_value)]
+fn active_watch_receives_signal(world: &mut InspectionWorld, signal: String) {
     world.capture_snapshot();
     let mut process = spawn_json_watch(world.root(), 10);
     let (lines, reader) = read_child_lines(&mut process);
     let initial = recv_watch_line(&lines);
+    let signal = match signal.as_str() {
+        "SIGHUP" => "-HUP",
+        "SIGINT" => "-INT",
+        "SIGTERM" => "-TERM",
+        other => panic!("unsupported watch signal: {other}"),
+    };
     let status = Command::new("/bin/kill")
-        .args(["-TERM", &process.id().to_string()])
+        .args([signal, &process.id().to_string()])
         .status()
-        .expect("SIGTERM must be sent");
+        .expect("termination signal must be sent");
     assert!(status.success());
 
     let output = process.wait_with_output();
@@ -356,6 +590,49 @@ fn verify_json_through_cli(world: &mut InspectionWorld) {
 #[when("запускается orchestrator run verify 10 в JSON")]
 fn verify_selected_run_json_through_cli(world: &mut InspectionWorld) {
     run_cli(world, ["run", "verify", "10", "--format", "json"]);
+}
+
+#[when("запускается orchestrator run verify в text")]
+fn verify_text_through_cli(world: &mut InspectionWorld) {
+    run_cli(world, ["run", "verify", "--format", "text"]);
+}
+
+#[when(expr = "запускается orchestrator run verify {word} в text")]
+#[allow(clippy::needless_pass_by_value)]
+fn verify_selected_run_text_through_cli(world: &mut InspectionWorld, run_id: String) {
+    run_cli(world, ["run", "verify", &run_id, "--format", "text"]);
+}
+
+#[when(expr = "запускается inspection-команда для случая {string}")]
+#[allow(clippy::needless_pass_by_value)]
+fn inspection_error_case(world: &mut InspectionWorld, case: String) {
+    match case.as_str() {
+        "невалидный RunId" => run_cli(world, ["run", "show", "bad-id"]),
+        "невалидный attempt number" => {
+            run_cli(world, ["run", "artifact", "30", "nope", "result"]);
+        }
+        "невалидный InputId" => {
+            run_cli(world, ["run", "artifact", "30", "0", "Bad"]);
+        }
+        "неизвестный RunId" => run_cli(world, ["run", "artifacts", "404"]),
+        "неизвестный attempt" => {
+            run_cli(world, ["run", "artifact", "30", "99", "result"]);
+        }
+        "неизвестный InputId" => {
+            run_cli(world, ["run", "artifact", "30", "0", "missing"]);
+        }
+        "artifact незавершённого attempt" => {
+            run_cli(world, ["run", "artifact", "30", "3", "result"]);
+        }
+        "show противоречивого run" => run_cli(world, ["run", "show", "20"]),
+        "artifacts противоречивого run" => {
+            run_cli(world, ["run", "artifacts", "20"]);
+        }
+        "artifact противоречивого run" => {
+            run_cli(world, ["run", "artifact", "20", "0", "result"]);
+        }
+        other => panic!("unknown inspection error case: {other}"),
+    }
 }
 
 #[when(expr = "запускается orchestrator run artifact {word} {word} {word}")]
@@ -382,6 +659,11 @@ fn inspection_exit_code(world: &mut InspectionWorld, code: u8) {
 #[then("inspection output пуст")]
 fn inspection_output_is_empty(world: &mut InspectionWorld) {
     assert!(world.observed().stdout.is_empty());
+}
+
+#[then("inspection output непуст")]
+fn inspection_output_is_not_empty(world: &mut InspectionWorld) {
+    assert!(!world.observed().stdout.is_empty());
 }
 
 #[then(
@@ -447,6 +729,16 @@ fn typed_snapshot_is_absent(world: &mut InspectionWorld) {
     assert!(world.typed_snapshot.is_none());
 }
 
+#[then("diagnostics сообщает о непрерывно меняющемся snapshot после четырёх попыток")]
+fn diagnostics_reports_four_failed_snapshot_attempts(world: &mut InspectionWorld) {
+    assert!(
+        world
+            .observed()
+            .stderr
+            .contains("непрерывно изменяется после 4 попыток")
+    );
+}
+
 #[then(expr = "JSON show содержит snake_case typed snapshot run {int} с number, null и arrays")]
 fn json_show_has_typed_snapshot(world: &mut InspectionWorld, run_id: u64) {
     let value: serde_json::Value =
@@ -476,6 +768,53 @@ fn watch_published_one_json_snapshot(world: &mut InspectionWorld) {
     let value: serde_json::Value = serde_json::from_str(lines[0]).expect("watch line must be JSON");
     assert_eq!(value["run_id"], 30);
     assert_eq!(value["state"], "completed");
+}
+
+#[then("watch опубликовал один blocked JSON snapshot")]
+fn watch_published_one_blocked_json_snapshot(world: &mut InspectionWorld) {
+    let lines = world.stdout_text().lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(lines[0]).expect("watch line must be JSON");
+    assert_eq!(value["run_id"], 20);
+    assert_eq!(value["state"], "blocked", "snapshot={value}");
+}
+
+#[then("watch опубликовал один text show document")]
+fn watch_published_one_text_show_document(world: &mut InspectionWorld) {
+    assert_eq!(
+        world.stdout_text(),
+        "run 30: workflow=completed state=completed\nstep first: attempts=0\nattempt 0: step=first state=completed session=- input=-\nfrontier: ready=- missing=-\n"
+    );
+}
+
+#[then("initial snapshot опубликован менее чем за 75 ms от запуска процесса")]
+fn initial_snapshot_was_published_immediately(world: &mut InspectionWorld) {
+    assert!(
+        world
+            .watch_initial_elapsed
+            .is_some_and(|elapsed| elapsed < Duration::from_millis(75))
+    );
+}
+
+#[then("четыре следующих snapshot опубликованы не быстрее чем за 360 ms и менее чем за 500 ms")]
+fn four_snapshots_were_published_at_hundred_millisecond_intervals(world: &mut InspectionWorld) {
+    let elapsed = world
+        .watch_four_polls_elapsed
+        .expect("four polling intervals must be observed");
+    assert!(
+        (Duration::from_millis(360)..Duration::from_millis(500)).contains(&elapsed),
+        "four polling intervals elapsed in {elapsed:?}"
+    );
+}
+
+#[then(
+    "text watch опубликовал подряд полные initial, четыре изменённых active и final completed show documents"
+)]
+fn text_watch_published_consecutive_changed_show_documents(world: &mut InspectionWorld) {
+    assert_eq!(
+        world.stdout_text(),
+        "run 10: workflow=active state=active\nstep first: attempts=0\nattempt 0: step=first state=active session=- input=-\nfrontier: ready=- missing=-\nrun 10: workflow=active state=active\nstep first: attempts=0\nattempt 0: step=first state=active session=poll-anchor input=-\nfrontier: ready=- missing=-\nrun 10: workflow=active state=active\nstep first: attempts=0\nattempt 0: step=first state=active session=poll-one input=-\nfrontier: ready=- missing=-\nrun 10: workflow=active state=active\nstep first: attempts=0\nattempt 0: step=first state=active session=poll-two input=-\nfrontier: ready=- missing=-\nrun 10: workflow=active state=active\nstep first: attempts=0\nattempt 0: step=first state=active session=poll-three input=-\nfrontier: ready=- missing=-\nrun 10: workflow=active state=completed\nstep first: attempts=0\nattempt 0: step=first state=completed session=poll-three input=-\nfrontier: ready=- missing=-\n"
+    );
 }
 
 #[then("watch опубликовал initial active и final completed snapshots")]
@@ -547,6 +886,17 @@ fn verify_report_contains_only_selected_run(world: &mut InspectionWorld) {
     );
 }
 
+#[then("verify text report содержит valid run 10 перед invalid run 20 с непустой diagnostic")]
+fn verify_text_report_contains_valid_before_invalid_with_diagnostic(world: &mut InspectionWorld) {
+    let lines = world.stdout_text().lines().collect::<Vec<_>>();
+    assert_eq!(lines.first(), Some(&"run 10: valid"));
+    let diagnostic = lines
+        .get(1)
+        .and_then(|line| line.strip_prefix("run 20: invalid: "))
+        .expect("invalid run with diagnostic must follow valid run");
+    assert!(!diagnostic.is_empty());
+}
+
 #[then("inspection не изменил durable state")]
 fn durable_state_is_unchanged(world: &mut InspectionWorld) {
     assert_eq!(world.durable_snapshot, snapshot(world.root()));
@@ -589,9 +939,13 @@ fn run_cli<const N: usize>(world: &mut InspectionWorld, arguments: [&str; N]) {
 }
 
 fn spawn_json_watch(root: &Path, run_id: u64) -> ChildGuard {
+    spawn_watch(root, run_id, "json")
+}
+
+fn spawn_watch(root: &Path, run_id: u64, format: &str) -> ChildGuard {
     ChildGuard::new(
         Command::new(env!("CARGO_BIN_EXE_orchestrator"))
-            .args(["run", "watch", &run_id.to_string(), "--format", "json"])
+            .args(["run", "watch", &run_id.to_string(), "--format", format])
             .env("ORC_HOME", root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -626,6 +980,10 @@ fn recv_watch_line(lines: &Receiver<String>) -> String {
         .expect("watch must publish snapshot before deadline")
 }
 
+fn recv_watch_lines(lines: &Receiver<String>, count: usize) -> Vec<String> {
+    (0..count).map(|_| recv_watch_line(lines)).collect()
+}
+
 fn observe_watch_output(output: &std::process::Output, snapshots: &[String]) -> Observed {
     let mut stdout = snapshots.join("\n").into_bytes();
     if !stdout.is_empty() {
@@ -651,6 +1009,29 @@ fn observe_api(result: Result<String, orchestrator::CommandError>) -> Observed {
             stdout: Vec::new(),
             stderr: error.to_string(),
         },
+    }
+}
+
+fn observe_typed_snapshot(
+    world: &mut InspectionWorld,
+    result: Result<RunInspection, orchestrator::CommandError>,
+) {
+    match result {
+        Ok(snapshot) => {
+            world.typed_snapshot = Some(snapshot);
+            world.observed = Some(Observed {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: String::new(),
+            });
+        }
+        Err(error) => {
+            world.observed = Some(Observed {
+                exit_code: error.exit_code(),
+                stdout: Vec::new(),
+                stderr: error.to_string(),
+            });
+        }
     }
 }
 
@@ -712,6 +1093,50 @@ fn write_blocked_run(root: &Path, run_id: u64) {
     fs::write(directory.join("0.first.done.artifact"), "done").unwrap();
 }
 
+fn write_terminal_blocked_run(root: &Path, run_id: u64) {
+    let directory = run_directory(root, run_id);
+    let spec = "workflow-id: blocked\nmax-parallel-agents: 5\nsteps:\n- id: source\n  agent: &agent\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: []\n  outputs: [{one-of: [start, wait]}]\n- id: left\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [{one-of: [{step: source, output: start}, {all: [{step: source, output: wait}, right]}]}]\n  outputs: []\n- id: right\n  agent: *agent\n  prompt: null\n  human: false\n  depends-on: [{one-of: [{step: source, output: start}, {all: [{step: source, output: wait}, left]}]}]\n  outputs: []\n";
+    write_run_files(
+        &directory,
+        spec,
+        &[(
+            "0.source.attempt.yaml",
+            "input: []\nevents:\n- type: completed\n",
+        )],
+    );
+    fs::write(directory.join("0.source.wait.artifact"), b"wait")
+        .expect("blocking branch artifact must be written");
+}
+
+fn start_snapshot_mutator(path: PathBuf) -> SnapshotMutator {
+    let temporary = path.with_file_name(".changing.tmp");
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = Arc::clone(&stop);
+    let (ready, started) = mpsc::sync_channel(0);
+    let thread = thread::spawn(move || {
+        let mut version = 1_u64;
+        loop {
+            fs::write(&temporary, version.to_le_bytes())
+                .expect("next artifact version must be written");
+            fs::rename(&temporary, &path).expect("next artifact version must be published");
+            if version == 1 {
+                ready.send(()).expect("mutator start must be observed");
+            }
+            if writer_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            version = version
+                .checked_add(1)
+                .expect("fixture version must fit u64");
+        }
+    });
+    started.recv().expect("snapshot mutator must start");
+    SnapshotMutator {
+        stop,
+        thread: Some(thread),
+    }
+}
+
 fn single_step_spec(workflow_id: &str, outputs: &str) -> String {
     format!(
         "workflow-id: {workflow_id}\nmax-parallel-agents: 5\nsteps:\n- id: first\n  agent:\n    type: codex\n    model: model\n    reasoning: high\n  prompt: null\n  human: false\n  depends-on: []\n  outputs: {outputs}\n"
@@ -735,6 +1160,12 @@ fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let run_root = root.join("run");
     if !run_root.exists() {
         return Vec::new();
+    }
+    if run_root.is_file() {
+        return vec![(
+            PathBuf::from("run"),
+            fs::read(run_root).expect("snapshot file must be readable"),
+        )];
     }
     let mut files = Vec::new();
     let mut directories = vec![run_root];

@@ -1,7 +1,32 @@
 steps:
-  - id: implement
-    agent: sol
-    prompt: migrate-spec
+  - id: route
+    process:
+      executable: /bin/sh
+      args:
+        - -c
+        - |
+          set -eu
+          input_step=$(printf '%s\n' "$ORC_INPUT" | /usr/bin/sed -n 's/^- step-id: //p')
+          input_id=$(printf '%s\n' "$ORC_INPUT" | /usr/bin/sed -n 's/^  input-id: //p')
+          case "$input_step:$input_id" in
+            :)
+              : > "$2"
+              ;;
+            decision:fix)
+              input_path=$(printf '%s\n' "$ORC_INPUT" | /usr/bin/sed -n 's/^  path: //p')
+              /bin/cp "$input_path" "$1"
+              ;;
+            decision:repeat)
+              : > "$2"
+              ;;
+            *)
+              echo "error: route received unexpected input $input_step:$input_id" >&2
+              exit 1
+              ;;
+          esac
+        - route
+        - "{{output:fix}}"
+        - "{{output:repeat}}"
     human: false
     depends-on:
       - one-of:
@@ -10,13 +35,53 @@ steps:
           - step: decision
             output: repeat
     outputs:
+      - one-of: [fix, repeat]
+  - id: implement-new
+    agent: sol
+    prompt: migrate-spec
+    human: false
+    depends-on:
+      - step: route
+        output: repeat
+    outputs:
       - one-of: [review, done]
+  - id: implement-fix
+    agent: sol
+    prompt: fix-migration
+    human: false
+    depends-on:
+      - step: route
+        output: fix
+    outputs: [review]
+  - id: review-input
+    process:
+      executable: /bin/sh
+      args:
+        - -c
+        - |
+          set -eu
+          input_path=$(printf '%s\n' "$ORC_INPUT" | /usr/bin/sed -n 's/^  path: //p')
+          if [ -z "$input_path" ]; then
+            echo "error: review-input received no artifact" >&2
+            exit 1
+          fi
+          /bin/cp "$input_path" "$1"
+        - review-input
+        - "{{output:review}}"
+    human: false
+    depends-on:
+      - one-of:
+          - step: implement-new
+            output: review
+          - step: implement-fix
+            output: review
+    outputs: [review]
   - id: review
     agent: sol
     prompt: review-migration
     human: true
     depends-on:
-      - step: implement
+      - step: review-input
         output: review
     outputs:
       - one-of: [fix, accept]
@@ -47,13 +112,23 @@ steps:
         - -c
         - |
           set -eu
-          case "$ORC_INPUT" in
-            *"step-id: implement"*) : > "$3" ;;
-            *"step-id: review"*)
-              review_path=$(printf '%s\n' "$ORC_INPUT" | /usr/bin/sed -n 's/^  path: //p')
-              /bin/cp "$review_path" "$1"
+          input_step=$(printf '%s\n' "$ORC_INPUT" | /usr/bin/sed -n 's/^- step-id: //p')
+          input_id=$(printf '%s\n' "$ORC_INPUT" | /usr/bin/sed -n 's/^  input-id: //p')
+          case "$input_step:$input_id" in
+            implement-new:done)
+              : > "$3"
               ;;
-            *) : > "$2" ;;
+            review:fix)
+              input_path=$(printf '%s\n' "$ORC_INPUT" | /usr/bin/sed -n 's/^  path: //p')
+              /bin/cp "$input_path" "$1"
+              ;;
+            :)
+              : > "$2"
+              ;;
+            *)
+              echo "error: decision received unexpected input $input_step:$input_id" >&2
+              exit 1
+              ;;
           esac
         - decision
         - "{{output:fix}}"
@@ -62,7 +137,7 @@ steps:
     human: false
     depends-on:
       - one-of:
-          - step: implement
+          - step: implement-new
             output: done
           - step: review
             output: fix

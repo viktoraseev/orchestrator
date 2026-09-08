@@ -20,6 +20,7 @@ struct ConditionalWorld {
     code: u8,
     error: String,
     lines: Vec<String>,
+    representations: Option<Representations>,
 }
 
 #[derive(Debug, Default)]
@@ -27,6 +28,14 @@ struct Fake {
     plans: Mutex<HashMap<String, VecDeque<Option<Vec<String>>>>>,
     calls: Mutex<Vec<(String, Vec<String>)>>,
     accepted: Mutex<Vec<bool>>,
+}
+
+#[derive(Debug)]
+struct Representations {
+    source_text: String,
+    source_json: String,
+    plan_text: String,
+    plan_json: String,
 }
 
 impl AgentRegistry for Fake {
@@ -341,34 +350,86 @@ fn environment(world: &ConditionalWorld) -> ProcessEnvironment {
 fn representations(world: &mut ConditionalWorld) {
     use orchestrator::{InspectionFormat, execute_workflow_plan, execute_workflow_show};
     let environment = environment(world);
-    for render in [execute_workflow_show, execute_workflow_plan] {
-        let text = render("delivery", &environment, InspectionFormat::Text).unwrap();
-        assert!(
-            text.contains("outputs=report,one-of(all(fix,patch),done)"),
-            "{text}"
-        );
-        assert!(
-            text.contains("depends-on=source:fix,source:report"),
-            "{text}"
-        );
-        let json: serde_json::Value = serde_json::from_str(
-            &render("delivery", &environment, InspectionFormat::Json).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            json["steps"][0]["outputs"],
-            serde_json::json!(["report", {"one-of": [{"all": ["fix", "patch"]}, "done"]}])
-        );
-        assert_eq!(
-            json["steps"][1]["depends_on"],
-            serde_json::json!([{"step": "source", "output": "fix"}, {"step": "source", "output": "report"}])
-        );
-    }
+    world.representations = Some(Representations {
+        source_text: execute_workflow_show("delivery", &environment, InspectionFormat::Text)
+            .unwrap(),
+        source_json: execute_workflow_show("delivery", &environment, InspectionFormat::Json)
+            .unwrap(),
+        plan_text: execute_workflow_plan("delivery", &environment, InspectionFormat::Text).unwrap(),
+        plan_json: execute_workflow_plan("delivery", &environment, InspectionFormat::Json).unwrap(),
+    });
+}
+
+#[then(
+    "source show text содержит `outputs=report,one-of(all(fix,patch),done)` и `depends-on=source:fix,source:report`"
+)]
+fn source_show_text_preserves_expressions(world: &mut ConditionalWorld) {
+    let representations = world
+        .representations
+        .as_ref()
+        .expect("representations must be captured");
+    assert_expression_text(&representations.source_text);
+}
+
+#[then(
+    "source show JSON сохраняет nested one-of/all outputs report, fix, patch, done и qualified dependencies source:fix и source:report в mappings step/output"
+)]
+fn source_show_json_preserves_expressions(world: &mut ConditionalWorld) {
+    let representations = world
+        .representations
+        .as_ref()
+        .expect("representations must be captured");
+    assert_expression_json(&representations.source_json);
+}
+
+#[then(
+    "materialized plan text содержит `outputs=report,one-of(all(fix,patch),done)` и `depends-on=source:fix,source:report`"
+)]
+fn materialized_plan_text_preserves_expressions(world: &mut ConditionalWorld) {
+    let representations = world
+        .representations
+        .as_ref()
+        .expect("representations must be captured");
+    assert_expression_text(&representations.plan_text);
+}
+
+#[then(
+    "materialized plan JSON сохраняет nested one-of/all outputs report, fix, patch, done и qualified dependencies source:fix и source:report в mappings step/output"
+)]
+fn materialized_plan_json_preserves_expressions(world: &mut ConditionalWorld) {
+    let representations = world
+        .representations
+        .as_ref()
+        .expect("representations must be captured");
+    assert_expression_json(&representations.plan_json);
 }
 
 #[then("run ещё не создан")]
 fn no_run(world: &mut ConditionalWorld) {
     assert!(!world.root.as_ref().unwrap().path().join("run").exists());
+}
+
+fn assert_expression_text(text: &str) {
+    assert!(
+        text.contains("outputs=report,one-of(all(fix,patch),done)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("depends-on=source:fix,source:report"),
+        "{text}"
+    );
+}
+
+fn assert_expression_json(json: &str) {
+    let json: serde_json::Value = serde_json::from_str(json).expect("representation must be JSON");
+    assert_eq!(
+        json["steps"][0]["outputs"],
+        serde_json::json!(["report", {"one-of": [{"all": ["fix", "patch"]}, "done"]}])
+    );
+    assert_eq!(
+        json["steps"][1]["depends_on"],
+        serde_json::json!([{"step": "source", "output": "fix"}, {"step": "source", "output": "report"}])
+    );
 }
 
 #[then("inspection видит done и не видит fix")]

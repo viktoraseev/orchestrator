@@ -289,25 +289,44 @@ fn json_plan(world: &mut WorkflowToolWorld) {
 #[then("JSON plan имеет закрытую Agent schema и только declarations parameters")]
 fn json_plan_has_closed_agent_schema(world: &mut WorkflowToolWorld) {
     let value = world.json();
-    assert_eq!(value.as_object().map(serde_json::Map::len), Some(4));
-    assert_eq!(value["parameters"].as_array().map(Vec::len), Some(1));
-    assert_eq!(value["parameters"][0], "mode");
-    assert_eq!(value["steps"].as_array().map(Vec::len), Some(2));
-    for step in value["steps"].as_array().expect("steps must be an array") {
-        assert_eq!(step.as_object().map(serde_json::Map::len), Some(7));
-        assert_eq!(step["agent"].as_object().map(serde_json::Map::len), Some(3));
-        assert!(step["process"].is_null());
-    }
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "workflow_id": "delivery",
+            "max_parallel_agents": 7,
+            "parameters": ["mode"],
+            "steps": [
+                {
+                    "id": "plan",
+                    "agent": {"type": "codex", "model": "gpt-test", "reasoning": "high"},
+                    "prompt": "SECRET PLAN",
+                    "process": null,
+                    "human": false,
+                    "depends_on": [],
+                    "outputs": ["spec"]
+                },
+                {
+                    "id": "implement",
+                    "agent": {"type": "codex", "model": "gpt-test", "reasoning": "high"},
+                    "prompt": "{{content:plan:spec}}",
+                    "process": null,
+                    "human": true,
+                    "depends_on": ["plan"],
+                    "outputs": ["source"]
+                }
+            ]
+        })
+    );
 }
 
-#[then("plan text содержит effective summaries без prompt content")]
+#[then(
+    "plan text по порядку содержит header max-parallel-agents 7, Step plan type codex model gpt-test reasoning high prompt-bytes 11 human false depends-on - outputs spec и Step implement type codex model gpt-test reasoning high prompt-bytes 21 human true depends-on plan outputs source"
+)]
 fn plan_text(world: &mut WorkflowToolWorld) {
-    let stdout = world.stdout();
-    assert!(stdout.starts_with("workflow delivery: max-parallel-agents=7\n"));
-    assert!(stdout.contains(
-        "step plan: type=codex model=gpt-test reasoning=high prompt-bytes=11 human=false depends-on=- outputs=spec"
-    ));
-    assert!(!stdout.contains("SECRET PLAN"));
+    assert_eq!(
+        world.stdout(),
+        "workflow delivery: max-parallel-agents=7\nstep plan: type=codex model=gpt-test reasoning=high prompt-bytes=11 human=false depends-on=- outputs=spec\nstep implement: type=codex model=gpt-test reasoning=high prompt-bytes=21 human=true depends-on=plan outputs=source\n"
+    );
 }
 
 #[then("каталог run отсутствует после workflow tool")]

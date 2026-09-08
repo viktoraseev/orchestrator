@@ -64,6 +64,27 @@ Feature: Исполнение произвольных процессов в wor
       And run не создан
 
     @process
+    Scenario: Workflow show text сохраняет точную source Process форму
+      Given подготовлен source Process workflow с relative cwd и executable
+      When запускается orchestrator workflow show delivery
+      Then source Process text содержит точные header и Step
+      And run не создан
+
+    @process
+    Scenario: Workflow show JSON сохраняет закрытую source Process schema
+      Given подготовлен source Process workflow с relative cwd и executable
+      When запускается orchestrator workflow show delivery в JSON
+      Then source Process JSON содержит source paths и nullable references
+      And run не создан
+
+    @process
+    Scenario: Workflow plan text сохраняет точную materialized Process форму
+      Given подготовлен source Process workflow с absolute cwd и executable
+      When запускается orchestrator workflow plan delivery
+      Then materialized Process text содержит точные header и Step
+      And run не создан
+
+    @process
     Scenario: JSON plan сохраняет закрытую Process schema без runtime parameter values
       Given подготовлен source Process workflow с parameter mode
       When запускается orchestrator workflow plan delivery в JSON

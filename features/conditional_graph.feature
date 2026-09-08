@@ -106,14 +106,17 @@ Feature: Условные ветви и последовательные пов�
         | вложенный цикл               |
         | поле fresh                   |
 
-  @cli:source-catalogs
   Rule: Source show и plan сохраняют выражения в публичном выводе
     Text сохраняет прежнюю форму плоских списков, печатает группы как all(...)/one-of(...) и qualified leaves как step:output; JSON сохраняет рекурсивную структуру выражений и mapping step/output.
 
     Scenario: Условия видны до запуска в source и materialized представлении
       Given подготовлен workflow с двумя qualified ссылками на source
       When проверяется source и materialized представление условий
-      Then run ещё не создан
+      Then source show text содержит `outputs=report,one-of(all(fix,patch),done)` и `depends-on=source:fix,source:report`
+      And source show JSON сохраняет nested one-of/all outputs report, fix, patch, done и qualified dependencies source:fix и source:report в mappings step/output
+      And materialized plan text содержит `outputs=report,one-of(all(fix,patch),done)` и `depends-on=source:fix,source:report`
+      And materialized plan JSON сохраняет nested one-of/all outputs report, fix, patch, done и qualified dependencies source:fix и source:report в mappings step/output
+      And run ещё не создан
 
   @cli:read-only-run-inspection
   Rule: Inspection перечисляет только artifacts выбранной output-ветви

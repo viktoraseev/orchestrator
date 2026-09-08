@@ -103,12 +103,6 @@ Config commands не получают run locks и не изменяют сущ�
 - `run verify` с RunId проверяет только выбранный run; text содержит `run <id>: valid` либо `run <id>: invalid: <diagnostic>`, I/O даёт `1`, неизвестный явно выбранный run — `4`.
 - Неизвестный явно выбранный RunId, attempt или InputId и artifact незавершённого attempt завершаются с `4`; синтаксически невалидный ID или attempt number завершается с `2`; противоречивая durable-модель завершается с `3`; до успешной полной проверки `run list`, `run show`, `run artifacts` и `run artifact` ничего не пишут в stdout.
 
-## Source catalogs
-
-- `workflow list`, `agent list` и `prompt list` являются read-only, разрешают только `--format text|json`, по умолчанию используют text и строят полный typed catalog до записи stdout.
-- `workflow show` text печатает header `workflow <id>: path=<absolute-path>`, Agent Steps в прежней форме `step <id>: agent=<id|-> prompt=<id|-> human=<true|false> depends-on=<id,...|-> outputs=<id,...|->`, а Process Steps как `step <id>: process=<executable> args=<count> cwd=<cwd|-> stdout=<input-id|-> depends-on=<id,...|-> outputs=<id,...|->`; JSON возвращает object `{workflow,path,parameters,steps}`, где Step дополнительно содержит nullable `process`, отсутствующие optional references равны `null`, а source references и executable не разрешаются.
-- `workflow plan` выполняет полный preflight выбранного WorkflowId; text после header печатает Agent Steps как прежде, а Process Steps как `step <id>: executor=process executable=<absolute-path> args=<count> cwd=<absolute-path> stdout=<input-id|-> depends-on=<id,...|-> outputs=<id,...|->`, JSON schema задана Rule «Workflow plan показывает тот же кандидат, который подготовил бы start» в `features/workflow_tools.feature`.
-- В `workflow show` и `workflow plan` text выражения отображаются как `all(...)`, `one-of(...)` и qualified leaf `step:output`; JSON сохраняет вложенные sequences и mappings `all`, `one-of`, `step`/`output`, а плоские списки сохраняют прежнюю форму.
 ## `validate`
 
 - Global I/O error во время `validate --all` прерывает команду с `1` без partial stdout.

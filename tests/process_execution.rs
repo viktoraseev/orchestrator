@@ -436,6 +436,23 @@ fn source_process_workflow_with_relative_paths(world: &mut ProcessWorld) {
     .expect("workflow must be written");
 }
 
+#[given("подготовлен source Process workflow с absolute cwd и executable")]
+fn source_process_workflow_with_absolute_paths(world: &mut ProcessWorld) {
+    let root = prepare_root(world);
+    let tools = root.join("tools");
+    fs::create_dir(&tools).expect("tools directory must be created");
+    let runner = executable(&tools, "runner.sh", "#!/bin/sh\nexit 0\n");
+    fs::write(
+        root.join("workflow/delivery.yaml"),
+        format!(
+            "steps:\n  - id: execute\n    process:\n      executable: {}\n      args: []\n      cwd: {}\n    human: false\n    depends-on: []\n    outputs: []\n",
+            runner.display(),
+            tools.display()
+        ),
+    )
+    .expect("workflow must be written");
+}
+
 #[when("Process workflow читается и планируется через публичный API")]
 fn inspect_process_workflow(world: &mut ProcessWorld) {
     world.source =
@@ -455,6 +472,21 @@ fn plan_process_workflow(world: &mut ProcessWorld) {
 #[when("запускается orchestrator workflow plan delivery в JSON")]
 fn plan_process_workflow_json(world: &mut ProcessWorld) {
     run_cli(world, &["workflow", "plan", "delivery", "--format", "json"]);
+}
+
+#[when("запускается orchestrator workflow show delivery")]
+fn show_process_workflow_text(world: &mut ProcessWorld) {
+    run_cli(world, &["workflow", "show", "delivery"]);
+}
+
+#[when("запускается orchestrator workflow show delivery в JSON")]
+fn show_process_workflow_json(world: &mut ProcessWorld) {
+    run_cli(world, &["workflow", "show", "delivery", "--format", "json"]);
+}
+
+#[when("запускается orchestrator workflow plan delivery")]
+fn plan_process_workflow_text(world: &mut ProcessWorld) {
+    run_cli(world, &["workflow", "plan", "delivery"]);
 }
 
 #[then("source Process сохраняет executable и argv")]
@@ -512,6 +544,58 @@ fn process_plan_json_has_closed_schema(world: &mut ProcessWorld) {
     assert!(Path::new(process["cwd"].as_str().expect("cwd must be a string")).is_absolute());
     assert_eq!(process["args"][0], "{{param:mode}}");
     assert!(process["stdout"].is_null());
+}
+
+#[then("source Process text содержит точные header и Step")]
+fn source_process_text_has_exact_schema(world: &mut ProcessWorld) {
+    assert_eq!(world.observed().code, 0, "{}", world.observed().stderr);
+    assert_eq!(
+        world.observed().stdout,
+        format!(
+            "workflow delivery: path={}\nstep execute: process=./runner.sh args=0 cwd=tools stdout=- depends-on=- outputs=-\n",
+            world.root().join("workflow/delivery.yaml").display()
+        )
+    );
+}
+
+#[then("source Process JSON содержит source paths и nullable references")]
+fn source_process_json_has_closed_schema(world: &mut ProcessWorld) {
+    assert_eq!(world.observed().code, 0, "{}", world.observed().stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(&world.observed().stdout).expect("source workflow must be JSON");
+    assert_eq!(value.as_object().map(serde_json::Map::len), Some(4));
+    assert_eq!(value["workflow"], "delivery");
+    assert_eq!(value["parameters"], serde_json::json!([]));
+    assert_eq!(value["steps"].as_array().map(Vec::len), Some(1));
+    let step = &value["steps"][0];
+    assert_eq!(step.as_object().map(serde_json::Map::len), Some(7));
+    assert_eq!(step["id"], "execute");
+    assert!(step["agent"].is_null());
+    assert!(step["prompt"].is_null());
+    assert_eq!(step["human"], false);
+    assert_eq!(step["depends_on"], serde_json::json!([]));
+    assert_eq!(step["outputs"], serde_json::json!([]));
+    let process = &step["process"];
+    assert_eq!(process.as_object().map(serde_json::Map::len), Some(4));
+    assert_eq!(process["executable"], "./runner.sh");
+    assert_eq!(process["args"], serde_json::json!([]));
+    assert_eq!(process["cwd"], "tools");
+    assert!(process["stdout"].is_null());
+}
+
+#[then("materialized Process text содержит точные header и Step")]
+fn materialized_process_text_has_exact_schema(world: &mut ProcessWorld) {
+    assert_eq!(world.observed().code, 0, "{}", world.observed().stderr);
+    let tools = fs::canonicalize(world.root().join("tools"))
+        .expect("tools directory must be canonicalizable");
+    assert_eq!(
+        world.observed().stdout,
+        format!(
+            "workflow delivery: max-parallel-agents=5\nstep execute: executor=process executable={} args=0 cwd={} stdout=- depends-on=- outputs=-\n",
+            tools.join("runner.sh").display(),
+            tools.display()
+        )
+    );
 }
 
 #[given("подготовлен Process Step завершающийся успешно со второго запуска")]

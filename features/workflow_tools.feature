@@ -45,7 +45,6 @@ Feature: Read-only workflow tooling
       Then workflow tool завершается с кодом 3
       And workflow tool stdout пуст
 
-  @cli:source-catalogs
   Rule: Workflow graph проверяет только source topology
 
     Scenario: Typed graph сохраняет bootstrap, nodes и dependency edges
@@ -83,9 +82,10 @@ Feature: Read-only workflow tooling
       Then workflow tool завершается с кодом 3
       And workflow tool stdout пуст
 
-  @cli:source-catalogs @cli:start
+  @cli:start
   Rule: Workflow plan показывает тот же кандидат, который подготовил бы start
     Validate, workflow plan и start используют общую полную materialization и graph validation boundary до создания данных run; plan возвращает typed кандидат до резервирования RunId, Run lock и durable publication.
+    Text после header печатает Agent Steps как `step <id>: type=<type> model=<model> reasoning=<reasoning> prompt-bytes=<bytes> human=<true|false> depends-on=<expression> outputs=<expression>`, а Process Steps как `step <id>: executor=process executable=<absolute-path> args=<count> cwd=<absolute-path> stdout=<input-id|-> depends-on=<expression> outputs=<expression>`.
     JSON plan содержит ровно snake_case поля `workflow_id`, `max_parallel_agents`, `parameters` и `steps`; parameters перечисляет ParameterIds без runtime values, каждый Step содержит `id`, nullable `agent`, nullable `prompt`, nullable `process`, `human`, `depends_on` и `outputs`, а Agent object — только `type`, `model` и `reasoning`.
 
     Scenario: Typed plan содержит effective Agent, prompt и parallel limit
@@ -108,7 +108,7 @@ Feature: Read-only workflow tooling
       Given подготовлен полностью materializable workflow delivery
       When запускается orchestrator workflow plan delivery
       Then workflow tool завершается с кодом 0
-      And plan text содержит effective summaries без prompt content
+      And plan text по порядку содержит header max-parallel-agents 7, Step plan type codex model gpt-test reasoning high prompt-bytes 11 human false depends-on - outputs spec и Step implement type codex model gpt-test reasoning high prompt-bytes 21 human true depends-on plan outputs source
 
     @process
     Scenario: Невалидный prompt plan не создаёт run и не даёт stdout

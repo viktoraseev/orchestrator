@@ -268,6 +268,22 @@ fn prompt_text_cli(world: &mut CatalogWorld) {
     run_cli(world, &["prompt", "list"]);
 }
 
+#[when(expr = "запускается orchestrator {word} list с явным --format text")]
+#[allow(clippy::needless_pass_by_value)]
+fn catalog_list_with_explicit_text_format(world: &mut CatalogWorld, catalog: String) {
+    run_cli(world, &[catalog.as_str(), "list", "--format", "text"]);
+}
+
+#[when(expr = "запускается orchestrator {word} list с недопустимым аргументом {word}")]
+#[allow(clippy::needless_pass_by_value)]
+fn catalog_list_with_invalid_argument(world: &mut CatalogWorld, catalog: String, argument: String) {
+    match argument.as_str() {
+        "positional" => run_cli(world, &[catalog.as_str(), "list", "unexpected"]),
+        "yaml-format" => run_cli(world, &[catalog.as_str(), "list", "--format", "yaml"]),
+        _ => panic!("unknown invalid catalog argument: {argument}"),
+    }
+}
+
 #[when("запускается orchestrator workflow show demo в JSON")]
 fn workflow_show_json_cli(world: &mut CatalogWorld) {
     run_cli(world, &["workflow", "show", "demo", "--format", "json"]);
@@ -447,12 +463,36 @@ fn typed_source_workflow(world: &mut CatalogWorld) {
 #[then("JSON workflow show содержит абсолютный path и Steps в source order")]
 fn workflow_show_json(world: &mut CatalogWorld) {
     let value = world.json();
+    assert_eq!(value.as_object().map(serde_json::Map::len), Some(4));
     assert_eq!(value["workflow"], "demo");
     assert!(Path::new(value["path"].as_str().expect("path must be a string")).is_absolute());
+    assert_eq!(value["parameters"], serde_json::json!([]));
+    assert_eq!(value["steps"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        value["steps"][0].as_object().map(serde_json::Map::len),
+        Some(7)
+    );
     assert_eq!(value["steps"][0]["id"], "plan");
     assert_eq!(value["steps"][0]["agent"], "missing-agent");
+    assert_eq!(value["steps"][0]["prompt"], "missing-prompt");
+    assert_eq!(value["steps"][0]["human"], false);
+    assert!(value["steps"][0]["process"].is_null());
+    assert_eq!(value["steps"][0]["depends_on"], serde_json::json!([]));
+    assert_eq!(value["steps"][0]["outputs"], serde_json::json!(["brief"]));
+    assert_eq!(
+        value["steps"][1].as_object().map(serde_json::Map::len),
+        Some(7)
+    );
     assert_eq!(value["steps"][1]["id"], "write");
-    assert_eq!(value["steps"][1]["depends_on"][0], "ghost-step");
+    assert_eq!(value["steps"][1]["agent"], "missing-writer");
+    assert_eq!(value["steps"][1]["prompt"], "missing-draft");
+    assert_eq!(value["steps"][1]["human"], true);
+    assert!(value["steps"][1]["process"].is_null());
+    assert_eq!(
+        value["steps"][1]["depends_on"],
+        serde_json::json!(["ghost-step"])
+    );
+    assert_eq!(value["steps"][1]["outputs"], serde_json::json!(["article"]));
 }
 
 #[then("workflow show text содержит header и обе source Step строки")]

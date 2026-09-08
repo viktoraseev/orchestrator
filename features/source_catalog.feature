@@ -1,7 +1,40 @@
 Feature: Read-only catalogs source definitions
   Catalog commands читают только выбранный state root, не materialize'ят workflow, не создают run и не изменяют файлы; весь catalog проверяется до renderer, поэтому ошибка не даёт partial stdout.
 
-  @cli:source-catalogs
+  Rule: List catalog commands принимают только format
+    `workflow list`, `agent list` и `prompt list` принимают только optional `--format text|json`, по умолчанию используют text и отклоняют остальные аргументы с syntax code 2.
+
+    @process
+    Scenario Outline: Явный text format принимается list-командой
+      Given подготовлен пустой source catalog root
+      When запускается orchestrator <catalog> list с явным --format text
+      Then catalog завершается с кодом 0
+      And catalog output пуст
+      And catalog не изменил source state
+
+      Examples:
+        | catalog  |
+        | workflow |
+        | agent    |
+        | prompt   |
+
+    @process
+    Scenario Outline: Недопустимый аргумент list-команды отклоняется parser
+      Given подготовлен пустой source catalog root
+      When запускается orchestrator <catalog> list с недопустимым аргументом <argument>
+      Then catalog завершается с кодом 2
+      And catalog output пуст
+      And catalog не изменил source state
+
+      Examples:
+        | catalog  | argument    |
+        | workflow | positional  |
+        | agent    | positional  |
+        | prompt   | positional  |
+        | workflow | yaml-format |
+        | agent    | yaml-format |
+        | prompt   | yaml-format |
+
   Rule: Workflow catalog перечисляет source templates без materialization
     Workflow template обнаруживается только как regular file `<root>/workflow/<workflow-id>.yaml`; contract basename является валидным WorkflowId, а посторонние и temporary entries не входят в catalog.
 
@@ -43,7 +76,6 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @cli:source-catalogs
   Rule: Agent catalog использует полную config validation
     Named Agents читаются только из optional `<root>/config.yaml`; отсутствие файла или пустой agents mapping даёт пустой catalog, а ошибка любого config field отклоняет весь catalog до вывода.
 
@@ -82,7 +114,6 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @cli:source-catalogs
   Rule: Prompt catalog полностью читает UTF-8 templates
     Prompt catalog читает каждый regular `<root>/prompt/<prompt-id>.md` contract file как произвольный UTF-8 Markdown без YAML-декодирования и считает точное число bytes; basename является валидным PromptId, а non-UTF-8, посторонние и temporary entries обрабатываются до вывода по правилам catalog.
 
@@ -138,9 +169,10 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 3
       And catalog output пуст
 
-  @cli:source-catalogs
   Rule: Workflow show читает source structure без materialization
     Workflow show выбирает ровно один source template, проверяет его структурную schema и symbolic IDs, сохраняет исходный порядок Steps и source references, но не читает config или prompts, не применяет defaults и не проверяет существование references либо graph reachability.
+    Text печатает header `workflow <id>: path=<absolute-path>`, Agent Step как `step <id>: agent=<id|-> prompt=<id|-> human=<true|false> depends-on=<expression> outputs=<expression>`, а Process Step как `step <id>: process=<executable> args=<count> cwd=<cwd|-> stdout=<input-id|-> depends-on=<expression> outputs=<expression>`.
+    JSON возвращает object с полями `workflow`, `path`, `parameters` и `steps`; каждый Step дополнительно содержит nullable `process`, отсутствующие optional references равны null, а source references и executable не разрешаются.
 
     Scenario: Typed source workflow сохраняет неразрешённые references и порядок Steps
       Given подготовлен source workflow demo с несуществующими Agent и prompt references
@@ -184,7 +216,6 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 2
       And catalog output пуст
 
-  @cli:source-catalogs
   Rule: Agent show выбирает Agent только после полной config validation
 
     Scenario: Typed Agent show возвращает выбранную validated запись
@@ -229,7 +260,6 @@ Feature: Read-only catalogs source definitions
       Then catalog завершается с кодом 4
       And catalog output пуст
 
-  @cli:source-catalogs
   Rule: Prompt show читает только выбранный template и сохраняет точные bytes
     Prompt show возвращает выбранный arbitrary UTF-8 Markdown побайтово, не применяя YAML-декодирование и не добавляя финальный newline.
 

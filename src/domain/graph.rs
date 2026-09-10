@@ -41,6 +41,7 @@ impl<'a> Graph<'a> {
             repeat: None,
         };
         graph.validate_references()?;
+        graph.validate_unambiguous_dependencies()?;
         graph.validate_reachability()?;
         graph.repeat = graph.validate_repeat()?;
         graph.validate_branch_reachability()?;
@@ -81,6 +82,27 @@ impl<'a> Graph<'a> {
                     "Step '{}': несовместимые outputs в depends-on",
                     step.id
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_unambiguous_dependencies(&self) -> Result<(), String> {
+        for step in &self.steps {
+            let alternatives = step.depends_on.alternatives();
+            for (index, left) in alternatives.iter().enumerate() {
+                let left_sources = ordered_sources(left);
+                for right in alternatives.iter().skip(index + 1) {
+                    if left_sources == ordered_sources(right) {
+                        let combined = left.iter().chain(right).copied().collect::<Vec<_>>();
+                        if self.coherent(&combined) {
+                            return Err(format!(
+                                "Step '{}': одновременно выполнимые alternatives выбирают одинаковую input group",
+                                step.id
+                            ));
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -294,4 +316,14 @@ impl<'a> Graph<'a> {
                         .all(|variant| variant.contains(output))
             })
     }
+}
+
+fn ordered_sources<'a>(leaves: &[&'a Dependency]) -> Vec<&'a str> {
+    let mut sources = Vec::new();
+    for leaf in leaves {
+        if !sources.contains(&leaf.step()) {
+            sources.push(leaf.step());
+        }
+    }
+    sources
 }

@@ -35,6 +35,12 @@ Feature: Условные ветви и последовательные пов�
       And attempt "target" получает inputs "0"
       And target получает artifacts "source:report,source:fix,source:patch"
 
+    Scenario: Взаимоисключающие alternatives одной source group остаются допустимыми
+      Given подготовлен workflow с взаимоисключающими qualified alternatives
+      When условный workflow выполняется до завершения
+      Then выполнены Steps "source,target"
+      And attempt "target" получает inputs "0"
+
     Scenario: One-of выбирает самую позднюю завершённую ветвь
       Given подготовлен diamond с one-of на join
       When условный workflow выполняется до завершения
@@ -87,7 +93,7 @@ Feature: Условные ветви и последовательные пов�
       Then resume отклоняет run кодом 3 без запуска Agent
 
   Rule: Validation учитывает выражения и гарантии обязательных placeholders
-    Пустые группы, повторные OutputIds, неизвестные artifact references, невыполнимые согласованные группы и обязательные placeholders без гарантированного artifact отклоняются до создания run; поле fresh не поддерживается.
+    Пустые группы, повторные OutputIds, неизвестные artifact references, невыполнимые согласованные группы, одновременно выполнимые alternatives с одинаковой input group и обязательные placeholders без гарантированного artifact отклоняются до создания run; поле fresh не поддерживается.
 
     Scenario Outline: Некорректный условный workflow отклоняется до запуска
       Given подготовлен невалидный условный workflow "<case>"
@@ -99,6 +105,7 @@ Feature: Условные ветви и последовательные пов�
         | повторный output             |
         | неизвестный output           |
         | несовместимые outputs source |
+        | неоднозначные alternatives   |
         | несовместимые ветви          |
         | негарантированный placeholder |
         | ранний возврат               |

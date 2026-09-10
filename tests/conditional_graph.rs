@@ -227,6 +227,23 @@ fn shared_source(world: &mut ConditionalWorld) {
     plan(world, "target", &[""]);
 }
 
+#[given("подготовлен workflow с взаимоисключающими qualified alternatives")]
+fn exclusive_alternatives(world: &mut ConditionalWorld) {
+    prepare(
+        world,
+        &[
+            step("source", "[]", "[{one-of: [fix, done]}]"),
+            step(
+                "target",
+                "[{one-of: [{step: source, output: fix}, {step: source, output: done}]}]",
+                "[]",
+            ),
+        ],
+    );
+    plan(world, "source", &["done"]);
+    plan(world, "target", &[""]);
+}
+
 #[given("подготовлен diamond с one-of на join")]
 fn choice_diamond(world: &mut ConditionalWorld) {
     prepare(
@@ -665,6 +682,14 @@ fn invalid(world: &mut ConditionalWorld, case: String) {
         "несовместимые outputs source" => vec![
             step("a", "[]", "[{one-of: [x, y]}]"),
             step("b", "[{step: a, output: x}, {step: a, output: y}]", "[]"),
+        ],
+        "неоднозначные alternatives" => vec![
+            step("a", "[]", "[x, y]"),
+            step(
+                "b",
+                "[{one-of: [{step: a, output: x}, {step: a, output: y}]}]",
+                "[]",
+            ),
         ],
         "несовместимые ветви" => vec![
             step("root", "[]", "[{one-of: [x, y]}]"),

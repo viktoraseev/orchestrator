@@ -2,6 +2,12 @@
 
 Этот документ задаёт публичное и agent-facing поведение CLI: команды, поиск конфигурации, вывод, коды завершения и обработку прерываний. Модель config, source definitions, durable layout, run, attempts, artifacts и workflow graph, включая cycles, planning и validation, определена в `features/*.feature`.
 
+## Термины
+
+- `durable` — свойство состояния, которое полностью опубликовано в хранилище и переживает завершение или падение процесса; это не отдельная сущность, тип конфига или стадия workflow.
+- Состояние в памяти ещё не durable; после подтверждённой атомарной публикации его видит следующий `resume`, а незавершённую публикацию `resume` игнорирует.
+- `materialized` означает, что ссылки source workflow на config, Agents, параметры и prompt templates разрешены в самодостаточные значения; materialization сама по себе не делает состояние durable.
+
 ## Команды и аргументы
 
 - `orchestrator start [<workflow-id>] [--param <parameter-id>=<value>]...` создаёт новый run выбранного workflow.
